@@ -1,0 +1,204 @@
+import argparse
+import logging
+
+import tensorflow as tf
+from tensorflow.python.saved_model import builder as saved_model_builder
+from tensorflow.python.saved_model import signature_constants
+from tensorflow.python.saved_model import signature_def_utils
+from tensorflow.python.saved_model import tag_constants
+from tensorflow.python.saved_model import utils as saved_model_utils
+
+import util
+from util import override_if_not_in_args
+
+Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch")
+Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, discrim_grads_and_vars, gen_loss_GAN, gen_loss_L1, gen_grads_and_vars, train")
+
+
+def load_examples():
+    if a.input_dir is None or not os.path.exists(a.input_dir):
+        raise Exception("input_dir does not exist")
+
+    input_paths = glob.glob(os.path.join(a.input_dir, "*.jpg"))
+    decode = tf.image.decode_jpeg
+    if len(input_paths) == 0:
+        input_paths = glob.glob(os.path.join(a.input_dir, "*.png"))
+        decode = tf.image.decode_png
+
+    if len(input_paths) == 0:
+        raise Exception("input_dir contains no image files")
+
+    def get_name(path):
+        name, _ = os.path.splitext(os.path.basename(path))
+        return name
+
+    # if the image names are numbers, sort by the value rather than asciibetically
+    # having sorted inputs means that the outputs are sorted in test mode
+    if all(get_name(path).isdigit() for path in input_paths):
+        input_paths = sorted(input_paths, key=lambda path: int(get_name(path)))
+    else:
+        input_paths = sorted(input_paths)
+
+    with tf.name_scope("load_images"):
+        path_queue = tf.train.string_input_producer(input_paths, shuffle=a.mode == "train")
+        reader = tf.WholeFileReader()
+        paths, contents = reader.read(path_queue)
+        raw_input = decode(contents)
+        raw_input = tf.image.convert_image_dtype(raw_input, dtype=tf.float32)
+
+        assertion = tf.assert_equal(tf.shape(raw_input)[2], 3, message="image does not have 3 channels")
+        with tf.control_dependencies([assertion]):
+            raw_input = tf.identity(raw_input)
+
+        raw_input.set_shape([None, None, 3])
+
+        if a.lab_colorization:
+            # load color and brightness from image, no B image exists here
+            lab = rgb_to_lab(raw_input)
+            L_chan, a_chan, b_chan = preprocess_lab(lab)
+            a_images = tf.expand_dims(L_chan, axis=2)
+            b_images = tf.stack([a_chan, b_chan], axis=2)
+        else:
+            # break apart image pair and move to range [-1, 1]
+            width = tf.shape(raw_input)[1] # [height, width, channels]
+            a_images = preprocess(raw_input[:,:width//2,:])
+            b_images = preprocess(raw_input[:,width//2:,:])
+
+    if a.which_direction == "AtoB":
+        inputs, targets = [a_images, b_images]
+    elif a.which_direction == "BtoA":
+        inputs, targets = [b_images, a_images]
+    else:
+        raise Exception("invalid direction")
+
+    # synchronize seed for image operations so that we do the same operations to both
+    # input and output images
+    seed = random.randint(0, 2**31 - 1)
+    def transform(image):
+        r = image
+        if a.flip:
+            r = tf.image.random_flip_left_right(r, seed=seed)
+
+        # area produces a nice downscaling, but does nearest neighbor for upscaling
+        # assume we're going to be doing downscaling here
+        r = tf.image.resize_images(r, [a.scale_size, a.scale_size], method=tf.image.ResizeMethod.AREA)
+
+        offset = tf.cast(tf.floor(tf.random_uniform([2], 0, a.scale_size - CROP_SIZE + 1, seed=seed)), dtype=tf.int32)
+        if a.scale_size > CROP_SIZE:
+            r = tf.image.crop_to_bounding_box(r, offset[0], offset[1], CROP_SIZE, CROP_SIZE)
+        elif a.scale_size < CROP_SIZE:
+            raise Exception("scale size cannot be less than crop size")
+        return r
+
+    with tf.name_scope("input_images"):
+        input_images = transform(inputs)
+
+    with tf.name_scope("target_images"):
+        target_images = transform(targets)
+
+    paths_batch, inputs_batch, targets_batch = tf.train.batch([paths, input_images, target_images], batch_size=a.batch_size)
+    steps_per_epoch = int(math.ceil(len(input_paths) / a.batch_size))
+
+    return Examples(
+        paths=paths_batch,
+        inputs=inputs_batch,
+        targets=targets_batch,
+        count=len(input_paths),
+        steps_per_epoch=steps_per_epoch,
+    )
+
+
+
+def create_model(inputs, targets):
+    def create_discriminator(discrim_inputs, discrim_targets):
+        n_layers = 3
+        layers = []
+
+        # 2x [batch, height, width, in_channels] => [batch, height, width, in_channels * 2]
+        input = tf.concat([discrim_inputs, discrim_targets], axis=3)
+
+        # layer_1: [batch, 256, 256, in_channels * 2] => [batch, 128, 128, ndf]
+        with tf.variable_scope("layer_1"):
+            convolved = conv(input, a.ndf, stride=2)
+            rectified = lrelu(convolved, 0.2)
+            layers.append(rectified)
+
+        # layer_2: [batch, 128, 128, ndf] => [batch, 64, 64, ndf * 2]
+        # layer_3: [batch, 64, 64, ndf * 2] => [batch, 32, 32, ndf * 4]
+        # layer_4: [batch, 32, 32, ndf * 4] => [batch, 31, 31, ndf * 8]
+        for i in range(n_layers):
+            with tf.variable_scope("layer_%d" % (len(layers) + 1)):
+                out_channels = a.ndf * min(2**(i+1), 8)
+                stride = 1 if i == n_layers - 1 else 2  # last layer here has stride 1
+                convolved = conv(layers[-1], out_channels, stride=stride)
+                normalized = batchnorm(convolved)
+                rectified = lrelu(normalized, 0.2)
+                layers.append(rectified)
+
+        # layer_5: [batch, 31, 31, ndf * 8] => [batch, 30, 30, 1]
+        with tf.variable_scope("layer_%d" % (len(layers) + 1)):
+            convolved = conv(rectified, out_channels=1, stride=1)
+            output = tf.sigmoid(convolved)
+            layers.append(output)
+
+        return layers[-1]
+
+    with tf.variable_scope("generator") as scope:
+        out_channels = int(targets.get_shape()[-1])
+        outputs = create_generator(inputs, out_channels)
+
+    # create two copies of discriminator, one for real pairs and one for fake pairs
+    # they share the same underlying variables
+    with tf.name_scope("real_discriminator"):
+        with tf.variable_scope("discriminator"):
+            # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
+            predict_real = create_discriminator(inputs, targets)
+
+    with tf.name_scope("fake_discriminator"):
+        with tf.variable_scope("discriminator", reuse=True):
+            # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
+            predict_fake = create_discriminator(inputs, outputs)
+
+    with tf.name_scope("discriminator_loss"):
+        # minimizing -tf.log will try to get inputs to 1
+        # predict_real => 1
+        # predict_fake => 0
+        discrim_loss = tf.reduce_mean(-(tf.log(predict_real + EPS) + tf.log(1 - predict_fake + EPS)))
+
+    with tf.name_scope("generator_loss"):
+        # predict_fake => 1
+        # abs(targets - outputs) => 0
+        gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
+        gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
+        gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
+
+    with tf.name_scope("discriminator_train"):
+        discrim_tvars = [var for var in tf.trainable_variables() if var.name.startswith("discriminator")]
+        discrim_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+        discrim_grads_and_vars = discrim_optim.compute_gradients(discrim_loss, var_list=discrim_tvars)
+        discrim_train = discrim_optim.apply_gradients(discrim_grads_and_vars)
+
+    with tf.name_scope("generator_train"):
+        with tf.control_dependencies([discrim_train]):
+            gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith("generator")]
+            gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+            gen_grads_and_vars = gen_optim.compute_gradients(gen_loss, var_list=gen_tvars)
+            gen_train = gen_optim.apply_gradients(gen_grads_and_vars)
+
+    ema = tf.train.ExponentialMovingAverage(decay=0.99)
+    update_losses = ema.apply([discrim_loss, gen_loss_GAN, gen_loss_L1])
+
+    global_step = tf.contrib.framework.get_or_create_global_step()
+    incr_global_step = tf.assign(global_step, global_step+1)
+
+    return Model(
+        predict_real=predict_real,
+        predict_fake=predict_fake,
+        discrim_loss=ema.average(discrim_loss),
+        discrim_grads_and_vars=discrim_grads_and_vars,
+        gen_loss_GAN=ema.average(gen_loss_GAN),
+        gen_loss_L1=ema.average(gen_loss_L1),
+        gen_grads_and_vars=gen_grads_and_vars,
+        outputs=outputs,
+        train=tf.group(update_losses, incr_global_step, gen_train),
+    )
