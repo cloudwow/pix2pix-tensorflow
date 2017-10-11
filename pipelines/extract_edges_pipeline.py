@@ -126,8 +126,10 @@ class ReadImage(beam.DoFn):
         x_offset=0
         y_offset=0
         train_img[y_offset:edges.shape[0], x_offset:edges.shape[1]] = edges
-        self.save_image(train_img, uri.replace("source","train"))
-        
+        if random.randrange(10) >=8:
+            self.save_image(train_img, uri.replace("source","eval-set"))
+        else:
+            self.save_image(train_img, uri.replace("source","train-set"))
     
 def run(args):
 #    pipeline_options = PipelineOptions.from_dictionary(vars(args))
