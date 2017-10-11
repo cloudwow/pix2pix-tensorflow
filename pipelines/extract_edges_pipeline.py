@@ -49,12 +49,12 @@ class ReadImage(beam.DoFn):
         final_image =  PIL.Image.fromarray(np_image)
         import io
         final_image_bytes = io.BytesIO()
-        final_image.save(final_image_bytes, format='PNG')
+        final_image.save(final_image_bytes, format='JPEG')
         result_bytes= final_image_bytes.getvalue()
         from apache_beam.io.gcp import gcsfilesystem
         
         file_system = gcsfilesystem.GCSFileSystem()
-        file  = file_system.create(destination, 'image/png')
+        file  = file_system.create(destination, 'image/jpeg')
 
         file.write(result_bytes)
         file.close()
@@ -119,6 +119,15 @@ class ReadImage(beam.DoFn):
         edges = cv2.dilate(edges, kernel, iterations=1)
         self.save_image(edges, uri.replace("source","input"))
 
+        train_img = np.zeros((256,512,3), np.uint8)
+        x_offset=256
+        y_offset=0
+        train_img[y_offset:img.shape[0], x_offset:256+img.shape[1]] = img
+        x_offset=0
+        y_offset=0
+        train_img[y_offset:edges.shape[0], x_offset:edges.shape[1]] = edges
+        self.save_image(train_img, uri.replace("source","train"))
+        
     
 def run(args):
 #    pipeline_options = PipelineOptions.from_dictionary(vars(args))
