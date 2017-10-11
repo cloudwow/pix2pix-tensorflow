@@ -15,7 +15,6 @@ import six
 import apache_beam as beam
 
 from apache_beam.metrics import Metrics
-from apache_beam.io.gcp import gcsfilesystem
 
 
 try:
@@ -41,70 +40,84 @@ class ListFiles(beam.DoFn):
       
 
 class ReadImage(beam.DoFn):
-  def __init__(self):
-      self.error_count = Metrics.counter('main', 'errorCount')
-      self.success_count = Metrics.counter('main', 'successCount')
+    def __init__(self):
+        self.error_count = Metrics.counter('main', 'errorCount')
+        self.success_count = Metrics.counter('main', 'successCount')
+        
+    def save_image(self, np_image, destination):
+        import PIL.Image
+        final_image =  PIL.Image.fromarray(np_image)
+        import io
+        final_image_bytes = io.BytesIO()
+        final_image.save(final_image_bytes, format='PNG')
+        result_bytes= final_image_bytes.getvalue()
+        from apache_beam.io.gcp import gcsfilesystem
+        
+        file_system = gcsfilesystem.GCSFileSystem()
+        file  = file_system.create(destination, 'image/png')
 
-  def process(self, uri):
-      from tensorflow.python.lib.io import file_io
-      from tensorflow.python.framework import errors
+        file.write(result_bytes)
+        file.close()
 
-      def _open_file_read_binary(uri):
+    def process(self, uri):
+        from tensorflow.python.lib.io import file_io
+        from tensorflow.python.framework import errors
+        
+        def _open_file_read_binary(uri):
+            
+            try:
+                return file_io.FileIO(uri, mode='rb')
+            except errors.InvalidArgumentError:
+                return file_io.FileIO(uri, mode='r')
+            
+        try:
+            with _open_file_read_binary(uri) as f:
+                image_bytes = f.read()
+                    
+        # A variety of different calling libraries throw different exceptions here.
+        # They all correspond to an unreadable file so we treat them equivalently.
+        except Exception as e:  # pylint: disable=broad-except
+            logging.exception('Error processing image %s: %s', uri, str(e))
+            self.error_count.inc()
+            return
 
-          try:
-              return file_io.FileIO(uri, mode='rb')
-          except errors.InvalidArgumentError:
-              return file_io.FileIO(uri, mode='r')
+        self.success_count.inc();
+        # Convert to desired format and output.
+        import cv2
+        import numpy as np
+        nparr = np.fromstring(image_bytes, np.uint8)
+        img = cv2.imdecode(nparr, cv2.IMREAD_COLOR) # cv2.IMREAD_COLOR in OpenCV 3.1
+        # fix weird color
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-      try:
-          with _open_file_read_binary(uri) as f:
-            image_bytes = f.read()
+        # crop the center
+        img = img[0:383, 64:447,0:3]
+        # resize to 256 square
+        img = cv2.resize(img, (256, 256)) 
+        self.save_image(img, uri.replace("source","target"))
 
-      # A variety of different calling libraries throw different exceptions here.
-      # They all correspond to an unreadable file so we treat them equivalently.
-      except Exception as e:  # pylint: disable=broad-except
-        logging.exception('Error processing image %s: %s', uri, str(e))
-        self.error_count.inc()
-        return
-
-      self.success_count.inc();
-      # Convert to desired format and output.
-      import cv2
-      import numpy as np
-      nparr = np.fromstring(image_bytes, np.uint8)
-      img = cv2.imdecode(nparr, cv2.IMREAD_COLOR) # cv2.IMREAD_COLOR in OpenCV 3.1
-      ###
-      # lower mask (0-10)
-      img_hsv = img
-      lower_red = np.array([0,0,0])
-      upper_red = np.array([255,30,255])
-      mask = cv2.inRange(img_hsv, lower_red, upper_red)
+        ###
+        # lower mask (0-10)
+        img_hsv = img
+        lower_red = np.array([0,0,0])
+        upper_red = np.array([255,30,255])
+        mask = cv2.inRange(img_hsv, lower_red, upper_red)
+        
       
-      
-      # set my output img to zero everywhere except my mask
-      output_img = img.copy()
-      output_img[np.where(mask==0)] = [255,255,255]
-      #    cv2.imshow('image1',output_img)
-      
-      ### 
-      edges = cv2.Canny(img,100,200)
-      
-      edges = cv2.bitwise_not(edges)
-      kernel = np.ones((3,3), np.uint8)
-      edges = cv2.erode(edges, kernel, iterations=1)
-      kernel = np.ones((3,3), np.uint8)
-      edges = cv2.dilate(edges, kernel, iterations=1)
-      import PIL.Image
-      final_image =  PIL.Image.fromarray(edges)
-
-      final_image_bytes = io.BytesIO()
-      final_image.save(final_image_bytes, format='PNG')
-      result_bytes= final_image_bytes.getvalue()
-      file_system = gcsfilesystem.GCSFileSystem()
-      file  = file_system.create(uri.replace("source","edge"), 'image/png')
-
-      file.write(result_bytes)
-      file.close()
+        # set my output img to zero everywhere except my mask
+        output_img = img.copy()
+        output_img[np.where(mask==0)] = [255,255,255]
+        #    cv2.imshow('image1',output_img)
+        
+        ### 
+        edges = cv2.Canny(img,100,200)
+        
+        edges = cv2.bitwise_not(edges)
+        kernel = np.ones((3,3), np.uint8)
+        edges = cv2.erode(edges, kernel, iterations=1)
+        kernel = np.ones((3,3), np.uint8)
+        edges = cv2.dilate(edges, kernel, iterations=1)
+        self.save_image(edges, uri.replace("source","input"))
 
     
 def run(args):
