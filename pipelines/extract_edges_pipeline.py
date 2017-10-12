@@ -44,7 +44,7 @@ class ReadImage(beam.DoFn):
         self.error_count = Metrics.counter('main', 'errorCount')
         self.success_count = Metrics.counter('main', 'successCount')
         
-    def save_image(self, np_image, destination):
+    def save_np_image(self, np_image, destination):
         import PIL.Image
         final_image =  PIL.Image.fromarray(np_image)
         import io
@@ -94,7 +94,7 @@ class ReadImage(beam.DoFn):
         img = img[0:383, 64:447,0:3]
         # resize to 256 square
         img = cv2.resize(img, (256, 256)) 
-        self.save_image(img, uri.replace("source","target"))
+        self.save_np_image(img, uri.replace("source","target"))
 
         ###
         # lower mask (0-10)
@@ -117,16 +117,21 @@ class ReadImage(beam.DoFn):
         edges = cv2.erode(edges, kernel, iterations=1)
         kernel = np.ones((3,3), np.uint8)
         edges = cv2.dilate(edges, kernel, iterations=1)
-        self.save_image(edges, uri.replace("source","input"))
-
+        self.save_np_image(edges, uri.replace("source","input"))
+        #        edges = np.resize(edges, (256, 256, 3))
+        img2 = np.zeros_like(img)
+        img2[:,:,0] = edges
+        img2[:,:,1] = edges
+        img2[:,:,2] = edges
+        edges =img2
         train_img = np.zeros((256,512,3), np.uint8)
         x_offset=256
         y_offset=0
-        train_img[y_offset:img.shape[0], x_offset:256+img.shape[1]] = img
+        train_img[ y_offset:img.shape[0], x_offset:256+img.shape[1]] = img
         x_offset=0
         y_offset=0
         train_img[y_offset:edges.shape[0], x_offset:edges.shape[1]] = edges
-        self.save_image(train_img, uri.replace("source","train"))
+        self.save_np_image(train_img, uri.replace("source","train"))
         
     
 def run(args):
