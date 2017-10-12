@@ -1,542 +1,490 @@
-# Copyright 2016 Google Inc. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""Example implementation of code to run on the Cloud ML service.
-
-This file is generic and can be reused by other models without modification.
-The only assumption this module has is that there exists model module that
-implements create_model() function. The function creates class implementing
-problem specific implementations of build_train_graph(), build_eval_graph(),
-build_prediction_graph() and format_metric_values().
+""" My Cool thing
 """
 
 import argparse
 import json
-import logging
 import os
-import shutil
-import subprocess
-import time
-import uuid
+import threading
 
-import model as model_lib
+import model
+
 import tensorflow as tf
-from tensorflow.python.lib.io import file_io
+
+from tensorflow.python.ops import variables
+from tensorflow.python.ops import lookup_ops
+from tensorflow.python.ops import control_flow_ops
+from tensorflow.python.saved_model import signature_constants as sig_constants
+
+tf.logging.set_verbosity(tf.logging.INFO)
 
 
-class Evaluator(object):
-  """Loads variables from latest checkpoint and performs model evaluation."""
+class EvaluationRunHook(tf.train.SessionRunHook):
+  """EvaluationRunHook performs continuous evaluation of the model.
 
-  def __init__(self, args, model, data_paths, dataset='eval'):
-    self.eval_batch_size = args.eval_batch_size
-    self.num_eval_batches = args.eval_set_size // self.eval_batch_size
-    self.batch_of_examples = []
-    self.checkpoint_path = train_dir(args.output_path)
-    self.output_path = os.path.join(args.output_path, dataset)
-    self.eval_data_paths = data_paths
-    self.batch_size = args.batch_size
-    self.stream = args.streaming_eval
-    self.model = model
+  Args:
+    checkpoint_dir (string): Dir to store model checkpoints
+    metric_dir (string): Dir to store metrics like accuracy and auroc
+    graph (tf.Graph): Evaluation graph
+    eval_frequency (int): Frequency of evaluation every n train steps
+    eval_steps (int): Evaluation steps to be performed
+  """
+  def __init__(self,
+               checkpoint_dir,
+               metric_dict,
+               graph,
+               eval_frequency,
+               eval_steps=None,
+               **kwargs):
 
-  def evaluate(self, num_eval_batches=None):
-    """Run one round of evaluation, return loss and accuracy."""
+    self._eval_steps = eval_steps
+    self._checkpoint_dir = checkpoint_dir
+    self._kwargs = kwargs
+    self._eval_every = eval_frequency
+    self._latest_checkpoint = None
+    self._checkpoints_since_eval = 0
+    self._graph = graph
 
-    num_eval_batches = num_eval_batches or self.num_eval_batches
-    with tf.Graph().as_default() as graph:
-      self.tensors = self.model.build_eval_graph(self.eval_data_paths,
-                                                 self.eval_batch_size)
+    # With the graph object as default graph
+    # See https://www.tensorflow.org/api_docs/python/tf/Graph#as_default
+    # Adds ops to the graph object
+    with graph.as_default():
+      value_dict, update_dict = tf.contrib.metrics.aggregate_metric_map(
+          metric_dict)
 
-      self.summary = tf.summary.merge_all()
+      # Op that creates a Summary protocol buffer by merging summaries
+      self._summary_op = tf.summary.merge([
+          tf.summary.scalar(name, value_op)
+          for name, value_op in value_dict.iteritems()
+      ])
 
-      self.saver = tf.train.Saver()
+      # Saver class add ops to save and restore
+      # variables to and from checkpoint
+      self._saver = tf.train.Saver()
 
-    self.summary_writer = tf.summary.FileWriter(self.output_path)
-    self.sv = tf.train.Supervisor(
-        graph=graph,
-        logdir=self.output_path,
-        summary_op=None,
-        global_step=None,
-        saver=self.saver)
+      # Creates a global step to contain a counter for
+      # the global training step
+      self._gs = tf.contrib.framework.get_or_create_global_step()
 
-    last_checkpoint = tf.train.latest_checkpoint(self.checkpoint_path)
-    with self.sv.managed_session(
-        master='', start_standard_services=False) as session:
-      self.sv.saver.restore(session, last_checkpoint)
+      self._final_ops_dict = value_dict
+      self._eval_ops = update_dict.values()
 
-      if self.stream:
-        self.sv.start_queue_runners(session)
-        for _ in range(num_eval_batches):
-          session.run(self.tensors.metric_updates)
-      else:
-        if not self.batch_of_examples:
-          self.sv.start_queue_runners(session)
-          for i in range(num_eval_batches):
-            self.batch_of_examples.append(session.run(self.tensors.examples))
+    # MonitoredTrainingSession runs hooks in background threads
+    # and it doesn't wait for the thread from the last session.run()
+    # call to terminate to invoke the next hook, hence locks.
+    self._eval_lock = threading.Lock()
+    self._checkpoint_lock = threading.Lock()
+    self._file_writer = tf.summary.FileWriter(
+        os.path.join(checkpoint_dir, 'eval'), graph=graph)
 
-        for i in range(num_eval_batches):
-          session.run(self.tensors.metric_updates,
-                      {self.tensors.examples: self.batch_of_examples[i]})
+  def after_run(self, run_context, run_values):
+    # Always check for new checkpoints in case a single evaluation
+    # takes longer than checkpoint frequency and _eval_every is >1
+    self._update_latest_checkpoint()
 
-      metric_values = session.run(self.tensors.metric_values)
-      global_step = tf.train.global_step(session, self.tensors.global_step)
-      summary = session.run(self.summary)
-      self.summary_writer.add_summary(summary, global_step)
-      self.summary_writer.flush()
-      return metric_values
-
-  def write_predictions(self):
-    """Run one round of predictions and write predictions to csv file."""
-    num_eval_batches = self.num_eval_batches + 1
-    with tf.Graph().as_default() as graph:
-      self.tensors = self.model.build_eval_graph(self.eval_data_paths,
-                                                 self.batch_size)
-      self.saver = tf.train.Saver()
-    self.sv = tf.train.Supervisor(
-        graph=graph,
-        logdir=self.output_path,
-        summary_op=None,
-        global_step=None,
-        saver=self.saver)
-
-    last_checkpoint = tf.train.latest_checkpoint(self.checkpoint_path)
-    with self.sv.managed_session(
-        master='', start_standard_services=False) as session:
-      self.sv.saver.restore(session, last_checkpoint)
-
-      with file_io.FileIO(os.path.join(self.output_path,
-                                       'predictions.csv'), 'w') as f:
-        to_run = [self.tensors.keys] + self.tensors.predictions
-        self.sv.start_queue_runners(session)
-        last_log_progress = 0
-        for i in range(num_eval_batches):
-          progress = i * 100 // num_eval_batches
-          if progress > last_log_progress:
-            logging.info('%3d%% predictions processed', progress)
-            last_log_progress = progress
-
-          res = session.run(to_run)
-          for element in range(len(res[0])):
-            f.write('%s' % res[0][element])
-            for prediction in res[1:]:
-              f.write(',')
-              f.write(str(prediction[element]))
-            f.write('\n')
-
-
-class Trainer(object):
-  """Performs model training and optionally evaluation."""
-
-  def __init__(self, args, model, cluster, task):
-    self.args = args
-    self.model = model
-    self.cluster = cluster
-    self.task = task
-    self.evaluator = Evaluator(self.args, self.model, self.args.eval_data_paths,
-                               'eval_set')
-    self.train_evaluator = Evaluator(self.args, self.model,
-                                     self.args.train_data_paths, 'train_set')
-    self.min_train_eval_rate = args.min_train_eval_rate
-
-  def run_training(self):
-    """Runs a Master."""
-    ensure_output_path(self.args.output_path)
-    self.train_path = train_dir(self.args.output_path)
-    self.model_path = model_dir(self.args.output_path)
-    self.is_master = self.task.type != 'worker'
-    log_interval = self.args.log_interval_secs
-    self.eval_interval = self.args.eval_interval_secs
-    if self.is_master and self.task.index > 0:
-      raise StandardError('Only one replica of master expected')
-
-    if self.cluster:
-      logging.info('Starting %s/%d', self.task.type, self.task.index)
-      server = start_server(self.cluster, self.task)
-      target = server.target
-      device_fn = tf.train.replica_device_setter(
-          ps_device='/job:ps',
-          worker_device='/job:%s/task:%d' % (self.task.type, self.task.index),
-          cluster=self.cluster)
-      # We use a device_filter to limit the communication between this job
-      # and the parameter servers, i.e., there is no need to directly
-      # communicate with the other workers; attempting to do so can result
-      # in reliability problems.
-      device_filters = [
-          '/job:ps', '/job:%s/task:%d' % (self.task.type, self.task.index)
-      ]
-      config = tf.ConfigProto(device_filters=device_filters)
-    else:
-      target = ''
-      device_fn = ''
-      config = None
-
-    with tf.Graph().as_default() as graph:
-      with tf.device(device_fn):
-        # Build the training graph.
-        self.tensors = self.model.build_train_graph(self.args.train_data_paths,
-                                                    self.args.batch_size)
-
-        init_op = tf.global_variables_initializer()
-
-        # Create a saver for writing training checkpoints.
-        self.saver = tf.train.Saver()
-
-        self.summary_op = tf.summary.merge_all()
-
-    # Create a "supervisor", which oversees the training process.
-    self.sv = tf.train.Supervisor(
-        graph,
-        is_chief=self.is_master,
-        logdir=self.train_path,
-        init_op=init_op,
-        saver=self.saver,
-        # Write summary_ops by hand.
-        summary_op=None,
-        global_step=self.tensors.global_step,
-        # No saving; we do it manually in order to easily evaluate immediately
-        # afterwards.
-        save_model_secs=0)
-
-    should_retry = True
-    to_run = [self.tensors.global_step, self.tensors.train]
-
-    while should_retry:
+    if self._eval_lock.acquire(False):
       try:
-        should_retry = False
-        with self.sv.managed_session(target, config=config) as session:
-          self.start_time = start_time = time.time()
-          self.last_save = self.last_log = 0
-          self.global_step = self.last_global_step = 0
-          self.local_step = self.last_local_step = 0
-          self.last_global_time = self.last_local_time = start_time
+        if self._checkpoints_since_eval > self._eval_every:
+          self._checkpoints_since_eval = 0
+          self._run_eval()
+      finally:
+        self._eval_lock.release()
 
-          # Loop until the supervisor shuts down or args.max_steps have
-          # completed.
-          self.max_steps = self.args.max_steps
-          while not self.sv.should_stop() and self.global_step < self.max_steps:
-            try:
-              # Run one step of the model.
-              self.global_step = session.run(to_run)[0]
-              self.local_step += 1
+  def _update_latest_checkpoint(self):
+    """Update the latest checkpoint file created in the output dir."""
+    if self._checkpoint_lock.acquire(False):
+      try:
+        latest = tf.train.latest_checkpoint(self._checkpoint_dir)
+        if not latest == self._latest_checkpoint:
+          self._checkpoints_since_eval += 1
+          self._latest_checkpoint = latest
+      finally:
+        self._checkpoint_lock.release()
 
-              self.now = time.time()
-              is_time_to_eval = (self.now - self.last_save) > self.eval_interval
-              is_time_to_log = (self.now - self.last_log) > log_interval
-              should_eval = self.is_master and is_time_to_eval
-              should_log = is_time_to_log or should_eval
+  def end(self, session):
+    """Called at then end of session to make sure we always evaluate."""
+    self._update_latest_checkpoint()
 
-              if should_log:
-                self.log(session)
+    with self._eval_lock:
+      self._run_eval()
 
-              if should_eval:
-                self.eval(session)
+  def _run_eval(self):
+    """Run model evaluation and generate summaries."""
+    coord = tf.train.Coordinator(clean_stop_exception_types=(
+        tf.errors.CancelledError, tf.errors.OutOfRangeError))
 
-            except tf.errors.AbortedError:
-              should_retry = True
+    with tf.Session(graph=self._graph) as session:
+      # Restores previously saved variables from latest checkpoint
+      self._saver.restore(session, self._latest_checkpoint)
 
-          if self.is_master:
-            # Take the final checkpoint and compute the final accuracy.
-            self.eval(session)
+      session.run([
+          tf.tables_initializer(),
+          tf.local_variables_initializer()
+      ])
+      tf.train.start_queue_runners(coord=coord, sess=session)
+      train_step = session.run(self._gs)
 
-            # Export the model for inference.
-            self.model.export(
-                tf.train.latest_checkpoint(self.train_path), self.model_path)
+      tf.logging.info('Starting Evaluation For Step: {}'.format(train_step))
+      with coord.stop_on_exception():
+        eval_step = 0
+        while not coord.should_stop() and (self._eval_steps is None or
+                                           eval_step < self._eval_steps):
+          summaries, final_values, _ = session.run(
+              [self._summary_op, self._final_ops_dict, self._eval_ops])
+          if eval_step % 100 == 0:
+            tf.logging.info("On Evaluation Step: {}".format(eval_step))
+          eval_step += 1
 
-      except tf.errors.AbortedError:
-        should_retry = True
-
-    # Ask for all the services to stop.
-    self.sv.stop()
-
-  def log(self, session):
-    """Logs training progress."""
-    logging.info('Train [%s/%d], step %d of %d (%.3f sec) %.1f '
-                 'global steps/s, %.1f local steps/s', self.task.type,
-                 self.task.index, self.global_step, self.max_steps,
-                 (self.now - self.start_time),
-                 (self.global_step - self.last_global_step) /
-                 (self.now - self.last_global_time),
-                 (self.local_step - self.last_local_step) /
-                 (self.now - self.last_local_time))
-
-    self.last_log = self.now
-    self.last_global_step, self.last_global_time = self.global_step, self.now
-    self.last_local_step, self.last_local_time = self.local_step, self.now
-
-  def eval(self, session):
-    """Runs evaluation loop."""
-    eval_start = time.time()
-    self.saver.save(session, self.sv.save_path, self.tensors.global_step)
-    logging.info(
-        'Eval, step %d:\n- on train set %s\n-- on eval set %s',
-        self.global_step,
-        self.model.format_metric_values(self.train_evaluator.evaluate()),
-        self.model.format_metric_values(self.evaluator.evaluate()))
-    now = time.time()
-
-    # Make sure eval doesn't consume too much of total time.
-    eval_time = now - eval_start
-    train_eval_rate = self.eval_interval / eval_time
-    if train_eval_rate < self.min_train_eval_rate and self.last_save > 0:
-      logging.info('Adjusting eval interval from %.2fs to %.2fs',
-                   self.eval_interval, self.min_train_eval_rate * eval_time)
-      self.eval_interval = self.min_train_eval_rate * eval_time
-
-    self.last_save = now
-    self.last_log = now
-
-  def save_summaries(self, session):
-    self.sv.summary_computed(session,
-                             session.run(self.summary_op), self.global_step)
-    self.sv.summary_writer.flush()
+      # Write the summaries
+      self._file_writer.add_summary(summaries, global_step=train_step)
+      self._file_writer.flush()
+      tf.logging.info(final_values)
 
 
-def main(_):
-  model, argv = model_lib.create_model()
-  run(model, argv)
+def run(target,
+        cluster_spec,
+        is_chief,
+        train_steps,
+        eval_steps,
+        job_dir,
+        reuse_job_dir,
+        train_files,
+        eval_files,
+        train_batch_size,
+        eval_batch_size,
+        learning_rate,
+        eval_frequency,
+        first_layer_size,
+        num_layers,
+        scale_factor,
+        num_epochs,
+        export_format):
 
+  """Run the training and evaluation graph.
+  Args:
+    target (string): Tensorflow server target
+    is_chief (bool): Boolean flag to specify a chief server
+    train_steps (int): Maximum number of training steps
+    eval_steps (int): Number of steps to run evaluation for at each checkpoint.
+      if eval_steps is None, evaluation will run for 1 epoch.
+    job_dir (string): Output dir for checkpoint and summary
+    train_files (string): List of CSV files to read train data
+    eval_files (string): List of CSV files to read eval data
+    train_batch_size (int): Batch size for training
+    eval_batch_size (int): Batch size for evaluation
+    learning_rate (float): Learning rate for Gradient Descent
+    eval_frequency (int): Run evaluation frequency every n training steps.
+      Do not evaluate too frequently otherwise you will
+      pay for performance and do not evaluate too in-frequently
+      otherwise you will not know how soon to stop training.
+      Use default values to start with
+    first_layer_size (int): Size of the first DNN layer
+    num_epochs (int): Maximum number of training data epochs on which to train
+    export_format (str): One of 'JSON', 'CSV' or 'EXAMPLE'. The input format
+      for the outputed saved_model binary.
+  """
 
-def run(model, argv):
-  """Runs the training loop."""
-  parser = argparse.ArgumentParser()
-  parser.add_argument(
-      '--train_data_paths',
-      type=str,
-      action='append',
-      help='The paths to the training data files. '
-      'Can be comma separated list of files or glob pattern.')
-  parser.add_argument(
-      '--eval_data_paths',
-      type=str,
-      action='append',
-      help='The path to the files used for evaluation. '
-      'Can be comma separated list of files or glob pattern.')
-  parser.add_argument(
-      '--output_path',
-      type=str,
-      help='The path to which checkpoints and other outputs '
-      'should be saved. This can be either a local or GCS '
-      'path.')
-  parser.add_argument(
-      '--max_steps',
-      type=int,)
-  parser.add_argument(
-      '--batch_size',
-      type=int,
-      help='Number of examples to be processed per mini-batch.')
-  parser.add_argument(
-      '--eval_set_size', type=int, help='Number of examples in the eval set.')
-  parser.add_argument(
-      '--eval_batch_size', type=int, help='Number of examples per eval batch.')
-  parser.add_argument(
-      '--eval_interval_secs',
-      type=float,
-      default=5,
-      help='Minimal interval between calculating evaluation metrics and saving'
-      ' evaluation summaries.')
-  parser.add_argument(
-      '--log_interval_secs',
-      type=float,
-      default=5,
-      help='Minimal interval between logging training metrics and saving '
-      'training summaries.')
-  parser.add_argument(
-      '--write_predictions',
-      action='store_true',
-      default=False,
-      help='If set, model is restored from latest checkpoint '
-      'and predictions are written to a csv file and no training is performed.')
-  parser.add_argument(
-      '--min_train_eval_rate',
-      type=int,
-      default=20,
-      help='Minimal train / eval time ratio on master. '
-      'Default value 20 means that 20x more time is used for training than '
-      'for evaluation. If evaluation takes more time the eval_interval_secs '
-      'is increased.')
-  parser.add_argument(
-      '--write_to_tmp',
-      action='store_true',
-      default=False,
-      help='If set, all checkpoints and summaries are written to '
-      'local filesystem (/tmp/) and copied to gcs once training is done. '
-      'This can speed up training but if training job fails all the summaries '
-      'and checkpoints are lost.')
-  parser.add_argument(
-      '--copy_train_data_to_tmp',
-      action='store_true',
-      default=False,
-      help='If set, training data is copied to local filesystem '
-      '(/tmp/). This can speed up training but requires extra space on the '
-      'local filesystem.')
-  parser.add_argument(
-      '--copy_eval_data_to_tmp',
-      action='store_true',
-      default=False,
-      help='If set, evaluation data is copied to local filesystem '
-      '(/tmp/). This can speed up training but requires extra space on the '
-      'local filesystem.')
-  parser.add_argument(
-      '--streaming_eval',
-      action='store_true',
-      default=False,
-      help='If set to True the evaluation is performed in streaming mode. '
-      'During each eval cycle the evaluation data is read and parsed from '
-      'files. This allows for having very large evaluation set. '
-      'If set to False (default) evaluation data is read once and cached in '
-      'memory. This results in faster evaluation cycle but can potentially '
-      'use more memory (in streaming mode large per-file read-ahead buffer is '
-      'used - which may exceed eval data size).')
-
-  args, _ = parser.parse_known_args(argv)
-
-  env = json.loads(os.environ.get('TF_CONFIG', '{}'))
-
-  # Print the job data as provided by the service.
-  logging.info('Original job data: %s', env.get('job', {}))
-
-  # First find out if there's a task value on the environment variable.
-  # If there is none or it is empty define a default one.
-  task_data = env.get('task', None) or {'type': 'master', 'index': 0}
-  task = type('TaskSpec', (object,), task_data)
-  trial = task_data.get('trial')
-  if trial is not None:
-    args.output_path = os.path.join(args.output_path, trial)
-  if args.write_to_tmp and args.output_path.startswith('gs://'):
-    output_path = args.output_path
-    args.output_path = os.path.join('/tmp/', str(uuid.uuid4()))
-    os.makedirs(args.output_path)
-  else:
-    output_path = None
-
-  if args.copy_train_data_to_tmp:
-    args.train_data_paths = copy_data_to_tmp(args.train_data_paths)
-  if args.copy_eval_data_to_tmp:
-    args.eval_data_paths = copy_data_to_tmp(args.eval_data_paths)
-
-  if not args.eval_batch_size:
-    # If eval_batch_size not set, use min of batch_size and eval_set_size
-    args.eval_batch_size = min(args.batch_size, args.eval_set_size)
-    logging.info("setting eval batch size to %s", args.eval_batch_size)
-
-  cluster_data = env.get('cluster', None)
-  cluster = tf.train.ClusterSpec(cluster_data) if cluster_data else None
-  if args.write_predictions:
-    write_predictions(args, model, cluster, task)
-  else:
-    dispatch(args, model, cluster, task)
-
-  if output_path and (not cluster or not task or task.type == 'master'):
-    subprocess.check_call([
-        'gsutil', '-m', '-q', 'cp', '-r', args.output_path + '/*', output_path
-    ])
-    shutil.rmtree(args.output_path, ignore_errors=True)
-
-
-def copy_data_to_tmp(input_files):
-  """Copies data to /tmp/ and returns glob matching the files."""
-  files = []
-  for e in input_files:
-    for path in e.split(','):
-      files.extend(file_io.get_matching_files(path))
-
-  for path in files:
-    if not path.startswith('gs://'):
-      return input_files
-
-  tmp_path = os.path.join('/tmp/', str(uuid.uuid4()))
-  os.makedirs(tmp_path)
-  subprocess.check_call(['gsutil', '-m', '-q', 'cp', '-r'] + files + [tmp_path])
-  return [os.path.join(tmp_path, '*')]
-
-
-def write_predictions(args, model, cluster, task):
-  if not cluster or not task or task.type == 'master':
-    pass  # Run locally.
-  else:
-    raise ValueError('invalid task_type %s' % (task.type,))
-
-  logging.info('Starting to write predictions on %s/%d', task.type, task.index)
-  evaluator = Evaluator(args, model, args.eval_data_paths)
-  evaluator.write_predictions()
-  logging.info('Done writing predictions on %s/%d', task.type, task.index)
-
-
-def dispatch(args, model, cluster, task):
-  if not cluster or not task or task.type == 'master':
-    # Run locally.
-    Trainer(args, model, cluster, task).run_training()
-  elif task.type == 'ps':
-    run_parameter_server(cluster, task)
-  elif task.type == 'worker':
-    Trainer(args, model, cluster, task).run_training()
-  else:
-    raise ValueError('invalid task_type %s' % (task.type,))
-
-
-def run_parameter_server(cluster, task):
-  logging.info('Starting parameter server %d', task.index)
-  server = start_server(cluster, task)
-  server.join()
-
-
-def start_server(cluster, task):
-  if not task.type:
-    raise ValueError('--task_type must be specified.')
-  if task.index is None:
-    raise ValueError('--task_index must be specified.')
-
-  # Create and start a server.
-  return tf.train.Server(
-      tf.train.ClusterSpec(cluster),
-      protocol='grpc',
-      job_name=task.type,
-      task_index=task.index)
-
-
-def ensure_output_path(output_path):
-  if not output_path:
-    raise ValueError('output_path must be specified')
-
-  # GCS doesn't have real directories.
-  if output_path.startswith('gs://'):
-    return
-
-  ensure_dir(output_path)
-
-
-def ensure_dir(path):
-  try:
-    os.makedirs(path)
-  except OSError as e:
-    # If the directory already existed, ignore the error.
-    if e.args[0] == 17:
-      pass
+  # If job_dir_reuse is False then remove the job_dir if it exists
+  if not reuse_job_dir:
+    if tf.gfile.Exists(job_dir):
+      tf.gfile.DeleteRecursively(job_dir)
+      tf.logging.info("Deleted job_dir {} to avoid re-use".format(job_dir))
     else:
-      raise
+      tf.logging.info("No job_dir available to delete")
+  else:
+    tf.logging.info("Reusing job_dir {} if it exists".format(job_dir))
 
 
-def train_dir(output_path):
-  return os.path.join(output_path, 'train')
+  # If the server is chief which is `master`
+  # In between graph replication Chief is one node in
+  # the cluster with extra responsibility and by default
+  # is worker task zero. We have assigned master as the chief.
+  #
+  # See https://youtu.be/la_M6bCV91M?t=1203 for details on
+  # distributed TensorFlow and motivation about chief.
+  if is_chief:
+    evaluation_graph = tf.Graph()
+    with evaluation_graph.as_default():
+
+      # Features and label tensors
+      features, labels = model.input_fn(
+          eval_files,
+          num_epochs=None if eval_steps else 1,
+          batch_size=eval_batch_size,
+          shuffle=False
+      )
+      # Accuracy and AUROC metrics
+      # model.model_fn returns the dict when EVAL mode
+      metric_dict = model.model_fn(
+          model.EVAL,
+          features.copy(),
+          labels,
+          learning_rate=learning_rate
+      )
+
+    hooks = [EvaluationRunHook(
+        job_dir,
+        metric_dict,
+        evaluation_graph,
+        eval_frequency,
+        eval_steps=eval_steps,
+    )]
+  else:
+    hooks = []
+
+  # Create a new graph and specify that as default
+  with tf.Graph().as_default():
+    # Placement of ops on devices using replica device setter
+    # which automatically places the parameters on the `ps` server
+    # and the `ops` on the workers
+    #
+    # See:
+    # https://www.tensorflow.org/api_docs/python/tf/train/replica_device_setter
+    with tf.device(tf.train.replica_device_setter(cluster=cluster_spec)):
+
+      # Features and label tensors as read using filename queue
+      features, labels = model.input_fn(
+          train_files,
+          num_epochs=num_epochs,
+          batch_size=train_batch_size
+      )
+
+      # Returns the training graph and global step tensor
+      train_op, global_step_tensor = model.model_fn(
+          model.TRAIN,
+          features.copy(),
+          labels,
+          learning_rate=learning_rate
+      )
+
+    # Creates a MonitoredSession for training
+    # MonitoredSession is a Session-like object that handles
+    # initialization, recovery and hooks
+    # https://www.tensorflow.org/api_docs/python/tf/train/MonitoredTrainingSession
+    with tf.train.MonitoredTrainingSession(master=target,
+                                           is_chief=is_chief,
+                                           checkpoint_dir=job_dir,
+                                           hooks=hooks,
+                                           save_checkpoint_secs=20,
+                                           save_summaries_steps=50) as session:
+      # Global step to keep track of global number of steps particularly in
+      # distributed setting
+      step = global_step_tensor.eval(session=session)
+
+      # Run the training graph which returns the step number as tracked by
+      # the global step tensor.
+      # When train epochs is reached, session.should_stop() will be true.
+      while (train_steps is None or
+             step < train_steps) and not session.should_stop():
+        step, _ = session.run([global_step_tensor, train_op])
+
+    # Find the filename of the latest saved checkpoint file
+    latest_checkpoint = tf.train.latest_checkpoint(job_dir)
+
+    # Only perform this if chief
+    if is_chief:
+      build_and_run_exports(latest_checkpoint,
+                            job_dir,
+                            model.SERVING_INPUT_FUNCTIONS[export_format],
+                            hidden_units)
 
 
-def eval_dir(output_path):
-  return os.path.join(output_path, 'eval')
+def main_op():
+  init_local = variables.local_variables_initializer()
+  init_tables = lookup_ops.tables_initializer()
+  return control_flow_ops.group(init_local, init_tables)
 
 
-def model_dir(output_path):
-  return os.path.join(output_path, 'model')
+def build_and_run_exports(latest, job_dir, serving_input_fn, hidden_units):
+  """Given the latest checkpoint file export the saved model.
+
+  Args:
+    latest (string): Latest checkpoint file
+    job_dir (string): Location of checkpoints and model files
+    name (string): Name of the checkpoint to be exported. Used in building the
+      export path.
+    hidden_units (list): Number of hidden units
+    learning_rate (float): Learning rate for the SGD
+  """
+
+  prediction_graph = tf.Graph()
+  exporter = tf.saved_model.builder.SavedModelBuilder(
+      os.path.join(job_dir, 'export'))
+  with prediction_graph.as_default():
+    features, inputs_dict = serving_input_fn()
+    prediction_dict = model.model_fn(
+        model.PREDICT,
+        features.copy(),
+        None,  # labels
+        hidden_units=hidden_units,
+        learning_rate=None  # learning_rate unused in prediction mode
+    )
+    saver = tf.train.Saver()
+
+    inputs_info = {
+        name: tf.saved_model.utils.build_tensor_info(tensor)
+        for name, tensor in inputs_dict.iteritems()
+    }
+    output_info = {
+        name: tf.saved_model.utils.build_tensor_info(tensor)
+        for name, tensor in prediction_dict.iteritems()
+    }
+    signature_def = tf.saved_model.signature_def_utils.build_signature_def(
+        inputs=inputs_info,
+        outputs=output_info,
+        method_name=sig_constants.PREDICT_METHOD_NAME
+    )
+
+  with tf.Session(graph=prediction_graph) as session:
+    session.run([tf.local_variables_initializer(), tf.tables_initializer()])
+    saver.restore(session, latest)
+    exporter.add_meta_graph_and_variables(
+        session,
+        tags=[tf.saved_model.tag_constants.SERVING],
+        signature_def_map={
+            sig_constants.DEFAULT_SERVING_SIGNATURE_DEF_KEY: signature_def
+        },
+        legacy_init_op=main_op()
+    )
+
+  exporter.save()
 
 
-if __name__ == '__main__':
-  logging.basicConfig(level=logging.INFO)
-  tf.app.run()
+def dispatch(*args, **kwargs):
+  """Parse TF_CONFIG to cluster_spec and call run() method
+  TF_CONFIG environment variable is available when running using
+  gcloud either locally or on cloud. It has all the information required
+  to create a ClusterSpec which is important for running distributed code.
+  """
+
+  tf_config = os.environ.get('TF_CONFIG')
+
+  # If TF_CONFIG is not available run local
+  if not tf_config:
+    return run(target='', cluster_spec=None, is_chief=True, *args, **kwargs)
+
+  tf_config_json = json.loads(tf_config)
+
+  cluster = tf_config_json.get('cluster')
+  job_name = tf_config_json.get('task', {}).get('type')
+  task_index = tf_config_json.get('task', {}).get('index')
+
+  # If cluster information is empty run local
+  if job_name is None or task_index is None:
+    return run(target='', cluster_spec=None, is_chief=True, *args, **kwargs)
+
+  cluster_spec = tf.train.ClusterSpec(cluster)
+  server = tf.train.Server(cluster_spec,
+                           job_name=job_name,
+                           task_index=task_index)
+
+  # Wait for incoming connections forever
+  # Worker ships the graph to the ps server
+  # The ps server manages the parameters of the model.
+  #
+  # See a detailed video on distributed TensorFlow
+  # https://www.youtube.com/watch?v=la_M6bCV91M
+  if job_name == 'ps':
+    server.join()
+    return
+  elif job_name in ['master', 'worker']:
+    return run(server.target, cluster_spec, is_chief=(job_name == 'master'),
+               *args, **kwargs)
+
+
+if __name__ == "__main__":
+  parser = argparse.ArgumentParser()
+  parser.add_argument('--train-files',
+                      required=True,
+                      type=str,
+                      help='Training files local or GCS', nargs='+')
+  parser.add_argument('--eval-files',
+                      required=True,
+                      type=str,
+                      help='Evaluation files local or GCS', nargs='+')
+  parser.add_argument('--job-dir',
+                      required=True,
+                      type=str,
+                      help="""\
+                      GCS or local dir for checkpoints, exports, and
+                      summaries. Use an existing directory to load a
+                      trained model, or a new directory to retrain""")
+  parser.add_argument('--reuse-job-dir',
+                      action='store_true',
+                      default=False,
+                      help="""\
+                      Flag to decide if the model checkpoint should
+                      be re-used from the job-dir. If False then the
+                      job-dir will be deleted
+                      """)
+  parser.add_argument('--train-steps',
+                      type=int,
+                      help='Maximum number of training steps to perform.')
+  parser.add_argument('--eval-steps',
+                      help="""\
+                      Number of steps to run evalution for at each checkpoint.
+                      If unspecified, will run for 1 full epoch over training
+                      data""",
+                      default=None,
+                      type=int)
+  parser.add_argument('--train-batch-size',
+                      type=int,
+                      default=40,
+                      help='Batch size for training steps')
+  parser.add_argument('--eval-batch-size',
+                      type=int,
+                      default=40,
+                      help='Batch size for evaluation steps')
+  parser.add_argument('--learning-rate',
+                      type=float,
+                      default=0.003,
+                      help='Learning rate for SGD')
+  parser.add_argument('--eval-frequency',
+                      default=50,
+                      help='Perform one evaluation per n steps')
+  parser.add_argument('--first-layer-size',
+                      type=int,
+                      default=256,
+                      help='Number of nodes in the first layer of DNN')
+  parser.add_argument('--num-layers',
+                      type=int,
+                      default=2,
+                      help='Number of layers in DNN')
+  parser.add_argument('--scale-factor',
+                      type=float,
+                      default=0.25,
+                      help="""\
+                      Rate of decay size of layer for Deep Neural Net.
+                      max(2, int(first_layer_size * scale_factor**i)) \
+                      """)
+  parser.add_argument('--num-epochs',
+                      type=int,
+                      help='Maximum number of epochs on which to train')
+  parser.add_argument('--export-format',
+                      type=str,
+                      choices=[model.JSON, model.CSV, model.EXAMPLE],
+                      default=model.JSON,
+                      help="""\
+                      Desired input format for the exported saved_model
+                      binary.""")
+  parser.add_argument('--verbosity',
+                      choices=[
+                          'DEBUG',
+                          'ERROR',
+                          'FATAL',
+                          'INFO',
+                          'WARN'
+                      ],
+                      default='INFO',
+                      help='Set logging verbosity')
+  parse_args, unknown = parser.parse_known_args()
+  # Set python level verbosity
+  tf.logging.set_verbosity(parse_args.verbosity)
+  # Set C++ Graph Execution level verbosity
+  os.environ['TF_CPP_MIN_LOG_LEVEL'] = str(
+      tf.logging.__dict__[parse_args.verbosity] / 10)
+  del parse_args.verbosity
+
+  if unknown:
+    tf.logging.warn('Unknown arguments: {}'.format(unknown))
+
+  dispatch(**parse_args.__dict__)

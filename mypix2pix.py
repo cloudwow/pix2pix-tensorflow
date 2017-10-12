@@ -15,6 +15,40 @@ import collections
 import math
 import time
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--input_dir", help="path to folder containing images")
+parser.add_argument("--mode", required=True, choices=["train", "test", "export"])
+parser.add_argument("--output_dir", required=True, help="where to put output files")
+parser.add_argument("--seed", type=int)
+parser.add_argument("--checkpoint", default=None, help="directory with checkpoint to resume training from or use for testing")
+
+parser.add_argument("--max_steps", type=int, help="number of training steps (0 to disable)")
+parser.add_argument("--max_epochs", type=int, help="number of training epochs")
+parser.add_argument("--summary_freq", type=int, default=100, help="update summaries every summary_freq steps")
+parser.add_argument("--progress_freq", type=int, default=50, help="display progress every progress_freq steps")
+parser.add_argument("--trace_freq", type=int, default=0, help="trace execution every trace_freq steps")
+parser.add_argument("--display_freq", type=int, default=0, help="write current training images every display_freq steps")
+parser.add_argument("--save_freq", type=int, default=5000, help="save model every save_freq steps, 0 to disable")
+
+parser.add_argument("--aspect_ratio", type=float, default=1.0, help="aspect ratio of output images (width/height)")
+parser.add_argument("--lab_colorization", action="store_true", help="split input image into brightness (A) and color (B)")
+parser.add_argument("--batch_size", type=int, default=1, help="number of images in batch")
+parser.add_argument("--which_direction", type=str, default="AtoB", choices=["AtoB", "BtoA"])
+parser.add_argument("--ngf", type=int, default=64, help="number of generator filters in first conv layer")
+parser.add_argument("--ndf", type=int, default=64, help="number of discriminator filters in first conv layer")
+parser.add_argument("--scale_size", type=int, default=286, help="scale images to this size before cropping to 256x256")
+parser.add_argument("--flip", dest="flip", action="store_true", help="flip images horizontally")
+parser.add_argument("--no_flip", dest="flip", action="store_false", help="don't flip images horizontally")
+parser.set_defaults(flip=True)
+parser.add_argument("--lr", type=float, default=0.0002, help="initial learning rate for adam")
+parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of adam")
+parser.add_argument("--l1_weight", type=float, default=100.0, help="weight on L1 term for generator gradient")
+parser.add_argument("--gan_weight", type=float, default=1.0, help="weight on GAN term for generator gradient")
+
+# export options
+parser.add_argument("--output_filetype", default="png", choices=["png", "jpeg"])
+a = parser.parse_args()
+
 EPS = 1e-12
 CROP_SIZE = 256
 
@@ -239,13 +273,25 @@ def load_examples():
 
         raw_input.set_shape([None, None, 3])
 
-        # break apart image pair and move to range [-1, 1]
-        width = tf.shape(raw_input)[1] # [height, width, channels]
-        a_images = preprocess(raw_input[:,:width//2,:])
-        b_images = preprocess(raw_input[:,width//2:,:])
+        if a.lab_colorization:
+            # load color and brightness from image, no B image exists here
+            lab = rgb_to_lab(raw_input)
+            L_chan, a_chan, b_chan = preprocess_lab(lab)
+            a_images = tf.expand_dims(L_chan, axis=2)
+            b_images = tf.stack([a_chan, b_chan], axis=2)
+        else:
+            # break apart image pair and move to range [-1, 1]
+            width = tf.shape(raw_input)[1] # [height, width, channels]
+            a_images = preprocess(raw_input[:,:width//2,:])
+            b_images = preprocess(raw_input[:,width//2:,:])
 
-    inputs, targets = [a_images, b_images]
-    
+    if a.which_direction == "AtoB":
+        inputs, targets = [a_images, b_images]
+    elif a.which_direction == "BtoA":
+        inputs, targets = [b_images, a_images]
+    else:
+        raise Exception("invalid direction")
+
     # synchronize seed for image operations so that we do the same operations to both
     # input and output images
     seed = random.randint(0, 2**31 - 1)
@@ -492,12 +538,11 @@ def append_index(filesets, step=False):
         index.write("</tr>")
     return index_path
 
-############################################## 
+
 def main():
     if tf.__version__.split('.')[0] != "1":
         raise Exception("Tensorflow version 1 required")
 
-    # set up random seed
     if a.seed is None:
         a.seed = random.randint(0, 2**31 - 1)
 
@@ -505,16 +550,114 @@ def main():
     np.random.seed(a.seed)
     random.seed(a.seed)
 
-    # find inputs and targets examples 
+    if not os.path.exists(a.output_dir):
+        os.makedirs(a.output_dir)
+
+    if a.mode == "test" or a.mode == "export":
+        if a.checkpoint is None:
+            raise Exception("checkpoint required for test mode")
+
+        # load some options from the checkpoint
+        options = {"which_direction", "ngf", "ndf", "lab_colorization"}
+        with open(os.path.join(a.checkpoint, "options.json")) as f:
+            for key, val in json.loads(f.read()).items():
+                if key in options:
+                    print("loaded", key, "=", val)
+                    setattr(a, key, val)
+        # disable these features in test mode
+        a.scale_size = CROP_SIZE
+        a.flip = False
+
+    for k, v in a._get_kwargs():
+        print(k, "=", v)
+
+    with open(os.path.join(a.output_dir, "options.json"), "w") as f:
+        f.write(json.dumps(vars(a), sort_keys=True, indent=4))
+
+    if a.mode == "export":
+        # export the generator to a meta graph that can be imported later for standalone generation
+        if a.lab_colorization:
+            raise Exception("export not supported for lab_colorization")
+
+        input = tf.placeholder(tf.string, shape=[1])
+        input_data = tf.decode_base64(input[0])
+        input_image = tf.image.decode_png(input_data)
+
+        # remove alpha channel if present
+        input_image = tf.cond(tf.equal(tf.shape(input_image)[2], 4), lambda: input_image[:,:,:3], lambda: input_image)
+        # convert grayscale to RGB
+        input_image = tf.cond(tf.equal(tf.shape(input_image)[2], 1), lambda: tf.image.grayscale_to_rgb(input_image), lambda: input_image)
+
+        input_image = tf.image.convert_image_dtype(input_image, dtype=tf.float32)
+        input_image.set_shape([CROP_SIZE, CROP_SIZE, 3])
+        batch_input = tf.expand_dims(input_image, axis=0)
+
+        with tf.variable_scope("generator"):
+            batch_output = deprocess(create_generator(preprocess(batch_input), 3))
+
+        output_image = tf.image.convert_image_dtype(batch_output, dtype=tf.uint8)[0]
+        if a.output_filetype == "png":
+            output_data = tf.image.encode_png(output_image)
+        elif a.output_filetype == "jpeg":
+            output_data = tf.image.encode_jpeg(output_image, quality=80)
+        else:
+            raise Exception("invalid filetype")
+        output = tf.convert_to_tensor([tf.encode_base64(output_data)])
+
+        key = tf.placeholder(tf.string, shape=[1])
+        inputs = {
+            "key": key.name,
+            "input": input.name
+        }
+        tf.add_to_collection("inputs", json.dumps(inputs))
+        outputs = {
+            "key":  tf.identity(key).name,
+            "output": output.name,
+        }
+        tf.add_to_collection("outputs", json.dumps(outputs))
+
+        init_op = tf.global_variables_initializer()
+        restore_saver = tf.train.Saver()
+        export_saver = tf.train.Saver()
+
+        with tf.Session() as sess:
+            sess.run(init_op)
+            print("loading model from checkpoint")
+            checkpoint = tf.train.latest_checkpoint(a.checkpoint)
+            restore_saver.restore(sess, checkpoint)
+            print("exporting model")
+            export_saver.export_meta_graph(filename=os.path.join(a.output_dir, "export.meta"))
+            export_saver.save(sess, os.path.join(a.output_dir, "export"), write_meta_graph=False)
+
+        return
+
     examples = load_examples()
     print("examples count = %d" % examples.count)
 
     # inputs and targets are [batch_size, height, width, channels]
     model = create_model(examples.inputs, examples.targets)
 
-    inputs = deprocess(examples.inputs)
-    targets = deprocess(examples.targets)
-    outputs = deprocess(model.outputs)
+    # undo colorization splitting on images that we use for display/output
+    if a.lab_colorization:
+        if a.which_direction == "AtoB":
+            # inputs is brightness, this will be handled fine as a grayscale image
+            # need to augment targets and outputs with brightness
+            targets = augment(examples.targets, examples.inputs)
+            outputs = augment(model.outputs, examples.inputs)
+            # inputs can be deprocessed normally and handled as if they are single channel
+            # grayscale images
+            inputs = deprocess(examples.inputs)
+        elif a.which_direction == "BtoA":
+            # inputs will be color channels only, get brightness from targets
+            inputs = augment(examples.inputs, examples.targets)
+            targets = deprocess(examples.targets)
+            outputs = deprocess(model.outputs)
+        else:
+            raise Exception("invalid direction")
+    else:
+        inputs = deprocess(examples.inputs)
+        targets = deprocess(examples.targets)
+        outputs = deprocess(model.outputs)
 
     def convert(image):
         if a.aspect_ratio != 1.0:
@@ -665,3 +808,4 @@ def main():
                     break
 
 
+main()
