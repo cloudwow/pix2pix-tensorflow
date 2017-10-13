@@ -15,11 +15,12 @@ import collections
 import math
 import time
 
+BASE_DIR="gs://pix2pixdata"
 EPS = 1e-12
 CROP_SIZE = 256
 
 Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch")
-Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, discrim_grads_and_vars, gen_loss_GAN, gen_loss_L1, gen_grads_and_vars, train")
+Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, discrim_grads_and_vars, gen_loss_GAN, gen_loss_L1, gen_grads_and_vars, train, global_step")
 
 
 def preprocess(image):
@@ -447,6 +448,7 @@ def create_model(inputs, targets,
         gen_grads_and_vars=gen_grads_and_vars,
         outputs=outputs,
         train=tf.group(update_losses, incr_global_step, gen_train),
+        global_step=global_step
     )
 
 
@@ -498,6 +500,8 @@ def append_index(filesets, step=False):
 
 
 def run(target, is_chief, job_name, a):
+    input_dir = BASE_DIR+"/"+a.topic+"/train_images"
+    output_dir = BASE_DIR+"/"+a.topic+"/output"
     with tf.Graph().as_default():
         # Placement of ops on devices using replica device setter
         # which automatically places the parameters on the `ps` server
@@ -517,8 +521,8 @@ def run(target, is_chief, job_name, a):
             np.random.seed(a.seed)
             random.seed(a.seed)
 
-            if not os.path.exists(a.output_dir):
-                os.makedirs(a.output_dir)
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
 
             if a.mode == "test" or a.mode == "export":
                 if a.checkpoint is None:
@@ -538,7 +542,7 @@ def run(target, is_chief, job_name, a):
             for k, v in a._get_kwargs():
                 print(k, "=", v)
 
-            with open(os.path.join(a.output_dir, "options.json"), "w") as f:
+            with open(os.path.join(output_dir, "options.json"), "w") as f:
                 f.write(json.dumps(vars(a), sort_keys=True, indent=4))
 
             if a.mode == "export":
@@ -585,18 +589,18 @@ def run(target, is_chief, job_name, a):
                 restore_saver = tf.train.Saver()
                 export_saver = tf.train.Saver()
 
-                with tf.Session() as sess:
-                    sess.run(init_op)
+                with tf.Session() as session:
+                    session.run(init_op)
                     print("loading model from checkpoint")
                     checkpoint = tf.train.latest_checkpoint(a.checkpoint)
-                    restore_saver.restore(sess, checkpoint)
+                    restore_saver.restore(session, checkpoint)
                     print("exporting model")
-                    export_saver.export_meta_graph(filename=os.path.join(a.output_dir, "export.meta"))
-                    export_saver.save(sess, os.path.join(a.output_dir, "export"), write_meta_graph=False)
+                    export_saver.export_meta_graph(filename=os.path.join(output_dir, "export.meta"))
+                    export_saver.save(session, os.path.join(output_dir, "export"), write_meta_graph=False)
 
                 return
 
-            examples = load_examples(a.input_dir, a.mode, a.scale_size, a.batch_size)
+            examples = load_examples(input_dir, a.mode, a.scale_size, a.batch_size)
             print("examples count = %d" % examples.count)
 
             # inputs and targets are [batch_size, height, width, channels]
@@ -672,96 +676,107 @@ def run(target, is_chief, job_name, a):
 
             saver = tf.train.Saver(max_to_keep=1)
 
-    logdir = a.output_dir if (a.trace_freq > 0 or a.summary_freq > 0) else None
-    sv = tf.train.Supervisor(logdir=logdir, save_summaries_secs=0, saver=None)
-    with sv.managed_session() as sess:
-        print("parameter_count =", sess.run(parameter_count))
+            logdir = output_dir if (a.trace_freq > 0 or a.summary_freq > 0) else None
+            with tf.train.MonitoredTrainingSession(master=target,
+                                                   is_chief=is_chief,
+                                                   checkpoint_dir=output_dir,
+                                                   hooks=[],
+                                                   save_checkpoint_secs=200,
+                                                   save_summaries_steps=50) as session:
 
-        if a.checkpoint is not None:
-            print("loading model from checkpoint")
-            checkpoint = tf.train.latest_checkpoint(a.checkpoint)
-            saver.restore(sess, checkpoint)
+                print("monitored session created.")
+#            sv = tf.train.Supervisor(logdir=logdir, save_summaries_secs=0, saver=None)
+#            with sv.managed_session() as sess:
+                print("parameter_count =", session.run(parameter_count))
 
-        max_steps = 2**32
-        if a.max_epochs is not None:
-            max_steps = examples.steps_per_epoch * a.max_epochs
-        if a.max_steps is not None:
-            max_steps = a.max_steps
+                if a.checkpoint is not None:
+                    print("loading model from checkpoint")
+                    checkpoint = tf.train.latest_checkpoint(a.checkpoint)
+                    saver.restore(session, checkpoint)
 
-        if a.mode == "test":
-            # testing
-            # at most, process the test data once
-            max_steps = min(examples.steps_per_epoch, max_steps)
-            for step in range(max_steps):
-                results = sess.run(display_fetches)
-                filesets = save_images(results, a.output_dir)
-                for i, f in enumerate(filesets):
-                    print("evaluated image", f["name"])
-                index_path = append_index(filesets)
+                max_steps = 2**32
+                if a.max_epochs is not None:
+                    max_steps = examples.steps_per_epoch * a.max_epochs
+                if a.max_steps is not None:
+                    max_steps = a.max_steps
 
-            print("wrote index at", index_path)
-        else:
-            # training
-            start = time.time()
+                if a.mode == "test":
+                    # testing
+                    # at most, process the test data once
+                    max_steps = min(examples.steps_per_epoch, max_steps)
+                    for step in range(max_steps):
+                        results = session.run(display_fetches)
+                        filesets = save_images(results, output_dir)
+                        for i, f in enumerate(filesets):
+                            print("evaluated image", f["name"])
+                        index_path = append_index(filesets)
 
-            for step in range(max_steps):
-                def should(freq):
-                    return freq > 0 and ((step + 1) % freq == 0 or step == max_steps - 1)
+                    print("wrote index at", index_path)
+                else:
+                    # training
+                    start = time.time()
+                    print("here we go")
 
-                options = None
-                run_metadata = None
-                if should(a.trace_freq):
-                    options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-                    run_metadata = tf.RunMetadata()
+                    for step in range(max_steps):
+                        print("step: " + str(step))
+                        def should(freq):
+                            return freq > 0 and ((step + 1) % freq == 0 or step == max_steps - 1)
 
-                fetches = {
-                    "train": model.train,
-                    "global_step": sv.global_step,
-                }
+                        options = None
+                        run_metadata = None
+                        if should(a.trace_freq):
+                            options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+                            run_metadata = tf.RunMetadata()
 
-                if should(a.progress_freq):
-                    fetches["discrim_loss"] = model.discrim_loss
-                    fetches["gen_loss_GAN"] = model.gen_loss_GAN
-                    fetches["gen_loss_L1"] = model.gen_loss_L1
+                        fetches = {
+                            "train": model.train,
+                            "global_step": model.global_step,
+                        }
 
-                if should(a.summary_freq):
-                    fetches["summary"] = sv.summary_op
+                        if should(a.progress_freq):
+                            fetches["discrim_loss"] = model.discrim_loss
+                            fetches["gen_loss_GAN"] = model.gen_loss_GAN
+                            fetches["gen_loss_L1"] = model.gen_loss_L1
 
-                if should(a.display_freq):
-                    fetches["display"] = display_fetches
+                        if should(a.summary_freq):
+#                            fetches["summary"] = sv.summary_op
+                            print("should summary")
+                        if should(a.display_freq):
+                            fetches["display"] = display_fetches
 
-                results = sess.run(fetches, options=options, run_metadata=run_metadata)
+                        results = session.run(fetches, options=options, run_metadata=run_metadata)
+                        print("global step: "+str(results["global_step"]))
+                        
+                        if should(a.summary_freq):
+                            print("recording summary")
+                        #    sv.summary_writer.add_summary(results["summary"], results["global_step"])
 
-                if should(a.summary_freq):
-                    print("recording summary")
-                    sv.summary_writer.add_summary(results["summary"], results["global_step"])
+                        if should(a.display_freq):
+                            print("saving display images")
+                            filesets = save_images(results["display"], output_dir, step=results["global_step"])
+                            append_index(filesets, step=True)
 
-                if should(a.display_freq):
-                    print("saving display images")
-                    filesets = save_images(results["display"], a.output_dir, step=results["global_step"])
-                    append_index(filesets, step=True)
+                        if should(a.trace_freq):
+                            print("recording trace")
+                         #   sv.summary_writer.add_run_metadata(run_metadata, "step_%d" % results["global_step"])
 
-                if should(a.trace_freq):
-                    print("recording trace")
-                    sv.summary_writer.add_run_metadata(run_metadata, "step_%d" % results["global_step"])
+                        if should(a.progress_freq):
+                            # global_step will have the correct step count if we resume from a checkpoint
+                            train_epoch = math.ceil(results["global_step"] / examples.steps_per_epoch)
+                            train_step = (results["global_step"] - 1) % examples.steps_per_epoch + 1
+                            rate = (step + 1) * a.batch_size / (time.time() - start)
+                            remaining = (max_steps - step) * a.batch_size / rate
+                            print("progress  epoch %d  step %d  image/sec %0.1f  remaining %dm" % (train_epoch, train_step, rate, remaining / 60))
+                            print("discrim_loss", results["discrim_loss"])
+                            print("gen_loss_GAN", results["gen_loss_GAN"])
+                            print("gen_loss_L1", results["gen_loss_L1"])
 
-                if should(a.progress_freq):
-                    # global_step will have the correct step count if we resume from a checkpoint
-                    train_epoch = math.ceil(results["global_step"] / examples.steps_per_epoch)
-                    train_step = (results["global_step"] - 1) % examples.steps_per_epoch + 1
-                    rate = (step + 1) * a.batch_size / (time.time() - start)
-                    remaining = (max_steps - step) * a.batch_size / rate
-                    print("progress  epoch %d  step %d  image/sec %0.1f  remaining %dm" % (train_epoch, train_step, rate, remaining / 60))
-                    print("discrim_loss", results["discrim_loss"])
-                    print("gen_loss_GAN", results["gen_loss_GAN"])
-                    print("gen_loss_L1", results["gen_loss_L1"])
+                        if should(a.save_freq):
+                            print("saving model")
+#                            saver.save(session, os.path.join(output_dir, "model"), global_step=sv.global_step)
 
-                if should(a.save_freq):
-                    print("saving model")
-                    saver.save(sess, os.path.join(a.output_dir, "model"), global_step=sv.global_step)
-
-                if sv.should_stop():
-                    break
+                        if session.should_stop():
+                            break
 
 
 
@@ -770,9 +785,8 @@ def run(target, is_chief, job_name, a):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input_dir", help="path to folder containing images")
+    parser.add_argument("--topic", help="e.g. simpson. should match folder name in GCS")
     parser.add_argument("--mode", required=True, choices=["train", "test", "export"])
-    parser.add_argument("--output_dir", required=True, help="where to put output files")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--checkpoint", default=None, help="directory with checkpoint to resume training from or use for testing")
 
