@@ -15,40 +15,6 @@ import collections
 import math
 import time
 
-parser = argparse.ArgumentParser()
-parser.add_argument("--input_dir", help="path to folder containing images")
-parser.add_argument("--mode", required=True, choices=["train", "test", "export"])
-parser.add_argument("--output_dir", required=True, help="where to put output files")
-parser.add_argument("--seed", type=int)
-parser.add_argument("--checkpoint", default=None, help="directory with checkpoint to resume training from or use for testing")
-
-parser.add_argument("--max_steps", type=int, help="number of training steps (0 to disable)")
-parser.add_argument("--max_epochs", type=int, help="number of training epochs")
-parser.add_argument("--summary_freq", type=int, default=100, help="update summaries every summary_freq steps")
-parser.add_argument("--progress_freq", type=int, default=50, help="display progress every progress_freq steps")
-parser.add_argument("--trace_freq", type=int, default=0, help="trace execution every trace_freq steps")
-parser.add_argument("--display_freq", type=int, default=0, help="write current training images every display_freq steps")
-parser.add_argument("--save_freq", type=int, default=5000, help="save model every save_freq steps, 0 to disable")
-
-parser.add_argument("--aspect_ratio", type=float, default=1.0, help="aspect ratio of output images (width/height)")
-parser.add_argument("--lab_colorization", action="store_true", help="split input image into brightness (A) and color (B)")
-parser.add_argument("--batch_size", type=int, default=1, help="number of images in batch")
-parser.add_argument("--which_direction", type=str, default="AtoB", choices=["AtoB", "BtoA"])
-parser.add_argument("--ngf", type=int, default=64, help="number of generator filters in first conv layer")
-parser.add_argument("--ndf", type=int, default=64, help="number of discriminator filters in first conv layer")
-parser.add_argument("--scale_size", type=int, default=286, help="scale images to this size before cropping to 256x256")
-parser.add_argument("--flip", dest="flip", action="store_true", help="flip images horizontally")
-parser.add_argument("--no_flip", dest="flip", action="store_false", help="don't flip images horizontally")
-parser.set_defaults(flip=True)
-parser.add_argument("--lr", type=float, default=0.0002, help="initial learning rate for adam")
-parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of adam")
-parser.add_argument("--l1_weight", type=float, default=100.0, help="weight on L1 term for generator gradient")
-parser.add_argument("--gan_weight", type=float, default=1.0, help="weight on GAN term for generator gradient")
-
-# export options
-parser.add_argument("--output_filetype", default="png", choices=["png", "jpeg"])
-a = parser.parse_args()
-
 EPS = 1e-12
 CROP_SIZE = 256
 
@@ -171,7 +137,7 @@ def rgb_to_lab(srgb):
             ])
             xyz_pixels = tf.matmul(rgb_pixels, rgb_to_xyz)
 
-        # https://en.wikipedia.org/wiki/Lab_color_space#CIELAB-CIEXYZ_conversions
+        # https://en.wikipedia .org/wiki/Lab_color_space#CIELAB-CIEXYZ_conversions
         with tf.name_scope("xyz_to_cielab"):
             # convert to fx = f(X/Xn), fy = f(Y/Yn), fz = f(Z/Zn)
 
@@ -237,13 +203,13 @@ def lab_to_rgb(lab):
         return tf.reshape(srgb_pixels, tf.shape(lab))
 
 
-def load_examples():
+def load_examples(input_dir, mode, scale_size, batch_size):
 
     input_paths = []
-    input_paths.extend(file_io.get_matching_files(a.input_dir+"/*.jpg"))
+    input_paths.extend(file_io.get_matching_files(input_dir+"/*.jpg"))
     decode = tf.image.decode_jpeg
     if len(input_paths) == 0:
-        input_paths = glob.glob(os.path.join(a.input_dir, "*.png"))
+        input_paths = glob.glob(os.path.join(input_dir, "*.png"))
         decode = tf.image.decode_png
 
     if len(input_paths) == 0:
@@ -261,7 +227,7 @@ def load_examples():
         input_paths = sorted(input_paths)
 
     with tf.name_scope("load_images"):
-        path_queue = tf.train.string_input_producer(input_paths, shuffle=a.mode == "train")
+        path_queue = tf.train.string_input_producer(input_paths, shuffle=mode == "train")
         reader = tf.WholeFileReader()
         paths, contents = reader.read(path_queue)
         raw_input = decode(contents)
@@ -273,41 +239,27 @@ def load_examples():
 
         raw_input.set_shape([None, None, 3])
 
-        if a.lab_colorization:
-            # load color and brightness from image, no B image exists here
-            lab = rgb_to_lab(raw_input)
-            L_chan, a_chan, b_chan = preprocess_lab(lab)
-            a_images = tf.expand_dims(L_chan, axis=2)
-            b_images = tf.stack([a_chan, b_chan], axis=2)
-        else:
-            # break apart image pair and move to range [-1, 1]
-            width = tf.shape(raw_input)[1] # [height, width, channels]
-            a_images = preprocess(raw_input[:,:width//2,:])
-            b_images = preprocess(raw_input[:,width//2:,:])
+        # break apart image pair and move to range [-1, 1]
+        width = tf.shape(raw_input)[1] # [height, width, channels]
+        a_images = preprocess(raw_input[:,:width//2,:])
+        b_images = preprocess(raw_input[:,width//2:,:])
 
-    if a.which_direction == "AtoB":
         inputs, targets = [a_images, b_images]
-    elif a.which_direction == "BtoA":
-        inputs, targets = [b_images, a_images]
-    else:
-        raise Exception("invalid direction")
 
     # synchronize seed for image operations so that we do the same operations to both
     # input and output images
     seed = random.randint(0, 2**31 - 1)
     def transform(image):
         r = image
-        if a.flip:
-            r = tf.image.random_flip_left_right(r, seed=seed)
 
         # area produces a nice downscaling, but does nearest neighbor for upscaling
         # assume we're going to be doing downscaling here
-        r = tf.image.resize_images(r, [a.scale_size, a.scale_size], method=tf.image.ResizeMethod.AREA)
+        r = tf.image.resize_images(r, [scale_size, scale_size], method=tf.image.ResizeMethod.AREA)
 
-        offset = tf.cast(tf.floor(tf.random_uniform([2], 0, a.scale_size - CROP_SIZE + 1, seed=seed)), dtype=tf.int32)
-        if a.scale_size > CROP_SIZE:
+        offset = tf.cast(tf.floor(tf.random_uniform([2], 0, scale_size - CROP_SIZE + 1, seed=seed)), dtype=tf.int32)
+        if scale_size > CROP_SIZE:
             r = tf.image.crop_to_bounding_box(r, offset[0], offset[1], CROP_SIZE, CROP_SIZE)
-        elif a.scale_size < CROP_SIZE:
+        elif scale_size < CROP_SIZE:
             raise Exception("scale size cannot be less than crop size")
         return r
 
@@ -317,8 +269,8 @@ def load_examples():
     with tf.name_scope("target_images"):
         target_images = transform(targets)
 
-    paths_batch, inputs_batch, targets_batch = tf.train.batch([paths, input_images, target_images], batch_size=a.batch_size)
-    steps_per_epoch = int(math.ceil(len(input_paths) / a.batch_size))
+    paths_batch, inputs_batch, targets_batch = tf.train.batch([paths, input_images, target_images], batch_size=batch_size)
+    steps_per_epoch = int(math.ceil(len(input_paths) / batch_size))
 
     return Examples(
         paths=paths_batch,
@@ -329,22 +281,22 @@ def load_examples():
     )
 
 
-def create_generator(generator_inputs, generator_outputs_channels):
+def create_generator(num_generator_filters, generator_inputs, generator_outputs_channels):
     layers = []
 
-    # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, ngf]
+    # encoder_1: [batch, 256, 256, in_channels] => [batch, 128, 128, num_generator_filters]
     with tf.variable_scope("encoder_1"):
-        output = conv(generator_inputs, a.ngf, stride=2)
+        output = conv(generator_inputs, num_generator_filters, stride=2)
         layers.append(output)
 
     layer_specs = [
-        a.ngf * 2, # encoder_2: [batch, 128, 128, ngf] => [batch, 64, 64, ngf * 2]
-        a.ngf * 4, # encoder_3: [batch, 64, 64, ngf * 2] => [batch, 32, 32, ngf * 4]
-        a.ngf * 8, # encoder_4: [batch, 32, 32, ngf * 4] => [batch, 16, 16, ngf * 8]
-        a.ngf * 8, # encoder_5: [batch, 16, 16, ngf * 8] => [batch, 8, 8, ngf * 8]
-        a.ngf * 8, # encoder_6: [batch, 8, 8, ngf * 8] => [batch, 4, 4, ngf * 8]
-        a.ngf * 8, # encoder_7: [batch, 4, 4, ngf * 8] => [batch, 2, 2, ngf * 8]
-        a.ngf * 8, # encoder_8: [batch, 2, 2, ngf * 8] => [batch, 1, 1, ngf * 8]
+        num_generator_filters * 2, # encoder_2: [batch, 128, 128, num_generator_filters] => [batch, 64, 64, num_generator_filters * 2]
+        num_generator_filters * 4, # encoder_3: [batch, 64, 64, num_generator_filters * 2] => [batch, 32, 32, num_generator_filters * 4]
+        num_generator_filters * 8, # encoder_4: [batch, 32, 32, num_generator_filters * 4] => [batch, 16, 16, num_generator_filters * 8]
+        num_generator_filters * 8, # encoder_5: [batch, 16, 16, num_generator_filters * 8] => [batch, 8, 8, num_generator_filters * 8]
+        num_generator_filters * 8, # encoder_6: [batch, 8, 8, num_generator_filters * 8] => [batch, 4, 4, num_generator_filters * 8]
+        num_generator_filters * 8, # encoder_7: [batch, 4, 4, num_generator_filters * 8] => [batch, 2, 2, num_generator_filters * 8]
+        num_generator_filters * 8, # encoder_8: [batch, 2, 2, num_generator_filters * 8] => [batch, 1, 1, num_generator_filters * 8]
     ]
 
     for out_channels in layer_specs:
@@ -356,13 +308,13 @@ def create_generator(generator_inputs, generator_outputs_channels):
             layers.append(output)
 
     layer_specs = [
-        (a.ngf * 8, 0.5),   # decoder_8: [batch, 1, 1, ngf * 8] => [batch, 2, 2, ngf * 8 * 2]
-        (a.ngf * 8, 0.5),   # decoder_7: [batch, 2, 2, ngf * 8 * 2] => [batch, 4, 4, ngf * 8 * 2]
-        (a.ngf * 8, 0.5),   # decoder_6: [batch, 4, 4, ngf * 8 * 2] => [batch, 8, 8, ngf * 8 * 2]
-        (a.ngf * 8, 0.0),   # decoder_5: [batch, 8, 8, ngf * 8 * 2] => [batch, 16, 16, ngf * 8 * 2]
-        (a.ngf * 4, 0.0),   # decoder_4: [batch, 16, 16, ngf * 8 * 2] => [batch, 32, 32, ngf * 4 * 2]
-        (a.ngf * 2, 0.0),   # decoder_3: [batch, 32, 32, ngf * 4 * 2] => [batch, 64, 64, ngf * 2 * 2]
-        (a.ngf, 0.0),       # decoder_2: [batch, 64, 64, ngf * 2 * 2] => [batch, 128, 128, ngf * 2]
+        (num_generator_filters * 8, 0.5),   # decoder_8: [batch, 1, 1, num_generator_filters * 8] => [batch, 2, 2, num_generator_filters * 8 * 2]
+        (num_generator_filters * 8, 0.5),   # decoder_7: [batch, 2, 2, num_generator_filters * 8 * 2] => [batch, 4, 4, num_generator_filters * 8 * 2]
+        (num_generator_filters * 8, 0.5),   # decoder_6: [batch, 4, 4, num_generator_filters * 8 * 2] => [batch, 8, 8, num_generator_filters * 8 * 2]
+        (num_generator_filters * 8, 0.0),   # decoder_5: [batch, 8, 8, num_generator_filters * 8 * 2] => [batch, 16, 16, num_generator_filters * 8 * 2]
+        (num_generator_filters * 4, 0.0),   # decoder_4: [batch, 16, 16, num_generator_filters * 8 * 2] => [batch, 32, 32, num_generator_filters * 4 * 2]
+        (num_generator_filters * 2, 0.0),   # decoder_3: [batch, 32, 32, num_generator_filters * 4 * 2] => [batch, 64, 64, num_generator_filters * 2 * 2]
+        (num_generator_filters, 0.0),       # decoder_2: [batch, 64, 64, num_generator_filters * 2 * 2] => [batch, 128, 128, num_generator_filters * 2]
     ]
 
     num_encoder_layers = len(layers)
@@ -386,7 +338,7 @@ def create_generator(generator_inputs, generator_outputs_channels):
 
             layers.append(output)
 
-    # decoder_1: [batch, 128, 128, ngf * 2] => [batch, 256, 256, generator_outputs_channels]
+    # decoder_1: [batch, 128, 128, num_generator_filters * 2] => [batch, 256, 256, generator_outputs_channels]
     with tf.variable_scope("decoder_1"):
         input = tf.concat([layers[-1], layers[0]], axis=3)
         rectified = tf.nn.relu(input)
@@ -397,7 +349,13 @@ def create_generator(generator_inputs, generator_outputs_channels):
     return layers[-1]
 
 
-def create_model(inputs, targets):
+def create_model(inputs, targets,
+                 num_generator_filters,
+                 num_discriminator_filters,
+                 gan_weight,
+                 l1_weight,
+                 lr,
+                 beta1):
     def create_discriminator(discrim_inputs, discrim_targets):
         n_layers = 3
         layers = []
@@ -405,25 +363,25 @@ def create_model(inputs, targets):
         # 2x [batch, height, width, in_channels] => [batch, height, width, in_channels * 2]
         input = tf.concat([discrim_inputs, discrim_targets], axis=3)
 
-        # layer_1: [batch, 256, 256, in_channels * 2] => [batch, 128, 128, ndf]
+        # layer_1: [batch, 256, 256, in_channels * 2] => [batch, 128, 128, num_discriminator_filters]
         with tf.variable_scope("layer_1"):
-            convolved = conv(input, a.ndf, stride=2)
+            convolved = conv(input, num_discriminator_filters, stride=2)
             rectified = lrelu(convolved, 0.2)
             layers.append(rectified)
 
-        # layer_2: [batch, 128, 128, ndf] => [batch, 64, 64, ndf * 2]
-        # layer_3: [batch, 64, 64, ndf * 2] => [batch, 32, 32, ndf * 4]
-        # layer_4: [batch, 32, 32, ndf * 4] => [batch, 31, 31, ndf * 8]
+        # layer_2: [batch, 128, 128, num_discriminator_filters] => [batch, 64, 64, num_discriminator_filters * 2]
+        # layer_3: [batch, 64, 64, num_discriminator_filters * 2] => [batch, 32, 32, num_discriminator_filters * 4]
+        # layer_4: [batch, 32, 32, num_discriminator_filters * 4] => [batch, 31, 31, num_discriminator_filters * 8]
         for i in range(n_layers):
             with tf.variable_scope("layer_%d" % (len(layers) + 1)):
-                out_channels = a.ndf * min(2**(i+1), 8)
+                out_channels = num_discriminator_filters * min(2**(i+1), 8)
                 stride = 1 if i == n_layers - 1 else 2  # last layer here has stride 1
                 convolved = conv(layers[-1], out_channels, stride=stride)
                 normalized = batchnorm(convolved)
                 rectified = lrelu(normalized, 0.2)
                 layers.append(rectified)
 
-        # layer_5: [batch, 31, 31, ndf * 8] => [batch, 30, 30, 1]
+        # layer_5: [batch, 31, 31, num_discriminator_filters * 8] => [batch, 30, 30, 1]
         with tf.variable_scope("layer_%d" % (len(layers) + 1)):
             convolved = conv(rectified, out_channels=1, stride=1)
             output = tf.sigmoid(convolved)
@@ -433,7 +391,7 @@ def create_model(inputs, targets):
 
     with tf.variable_scope("generator") as scope:
         out_channels = int(targets.get_shape()[-1])
-        outputs = create_generator(inputs, out_channels)
+        outputs = create_generator(num_generator_filters,  inputs, out_channels)
 
     # create two copies of discriminator, one for real pairs and one for fake pairs
     # they share the same underlying variables
@@ -458,18 +416,18 @@ def create_model(inputs, targets):
         # abs(targets - outputs) => 0
         gen_loss_GAN = tf.reduce_mean(-tf.log(predict_fake + EPS))
         gen_loss_L1 = tf.reduce_mean(tf.abs(targets - outputs))
-        gen_loss = gen_loss_GAN * a.gan_weight + gen_loss_L1 * a.l1_weight
+        gen_loss = gen_loss_GAN * gan_weight + gen_loss_L1 * l1_weight
 
     with tf.name_scope("discriminator_train"):
         discrim_tvars = [var for var in tf.trainable_variables() if var.name.startswith("discriminator")]
-        discrim_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+        discrim_optim = tf.train.AdamOptimizer(lr, beta1)
         discrim_grads_and_vars = discrim_optim.compute_gradients(discrim_loss, var_list=discrim_tvars)
         discrim_train = discrim_optim.apply_gradients(discrim_grads_and_vars)
 
     with tf.name_scope("generator_train"):
         with tf.control_dependencies([discrim_train]):
             gen_tvars = [var for var in tf.trainable_variables() if var.name.startswith("generator")]
-            gen_optim = tf.train.AdamOptimizer(a.lr, a.beta1)
+            gen_optim = tf.train.AdamOptimizer(lr, beta1)
             gen_grads_and_vars = gen_optim.compute_gradients(gen_loss, var_list=gen_tvars)
             gen_train = gen_optim.apply_gradients(gen_grads_and_vars)
 
@@ -492,8 +450,8 @@ def create_model(inputs, targets):
     )
 
 
-def save_images(fetches, step=None):
-    image_dir = os.path.join(a.output_dir, "images")
+def save_images(fetches, output_dir, step=None):
+    image_dir = os.path.join(output_dir, "images")
     if not os.path.exists(image_dir):
         os.makedirs(image_dir)
 
@@ -515,7 +473,7 @@ def save_images(fetches, step=None):
 
 
 def append_index(filesets, step=False):
-    index_path = os.path.join(a.output_dir, "index.html")
+    index_path = os.path.join(output_dir, "index.html")
     if os.path.exists(index_path):
         index = open(index_path, "a")
     else:
@@ -539,182 +497,180 @@ def append_index(filesets, step=False):
     return index_path
 
 
-def main():
-    if tf.__version__.split('.')[0] != "1":
-        raise Exception("Tensorflow version 1 required")
+def run(target, is_chief, job_name, a):
+    with tf.Graph().as_default():
+        # Placement of ops on devices using replica device setter
+        # which automatically places the parameters on the `ps` server
+        # and the `ops` on the workers
+        #
+        # See:
+        # https://www.tensorflow.org/api_docs/python/tf/train/replica_device_setter
+        with tf.device(tf.train.replica_device_setter()):
 
-    if a.seed is None:
-        a.seed = random.randint(0, 2**31 - 1)
+            if tf.__version__.split('.')[0] != "1":
+                raise Exception("Tensorflow version 1 required")
 
-    tf.set_random_seed(a.seed)
-    np.random.seed(a.seed)
-    random.seed(a.seed)
+            if a.seed is None:
+                a.seed = random.randint(0, 2**31 - 1)
 
-    if not os.path.exists(a.output_dir):
-        os.makedirs(a.output_dir)
+            tf.set_random_seed(a.seed)
+            np.random.seed(a.seed)
+            random.seed(a.seed)
 
-    if a.mode == "test" or a.mode == "export":
-        if a.checkpoint is None:
-            raise Exception("checkpoint required for test mode")
+            if not os.path.exists(a.output_dir):
+                os.makedirs(a.output_dir)
 
-        # load some options from the checkpoint
-        options = {"which_direction", "ngf", "ndf", "lab_colorization"}
-        with open(os.path.join(a.checkpoint, "options.json")) as f:
-            for key, val in json.loads(f.read()).items():
-                if key in options:
-                    print("loaded", key, "=", val)
-                    setattr(a, key, val)
-        # disable these features in test mode
-        a.scale_size = CROP_SIZE
-        a.flip = False
+            if a.mode == "test" or a.mode == "export":
+                if a.checkpoint is None:
+                    raise Exception("checkpoint required for test mode")
 
-    for k, v in a._get_kwargs():
-        print(k, "=", v)
+                # load some options from the checkpoint
+                options = {"which_direction", "num_generator_filters", "num_discriminator_filters"}
+                with open(os.path.join(a.checkpoint, "options.json")) as f:
+                    for key, val in json.loads(f.read()).items():
+                        if key in options:
+                            print("loaded", key, "=", val)
+                            setattr(a, key, val)
+                # disable these features in test mode
+                a.scale_size = CROP_SIZE
+                a.flip = False
 
-    with open(os.path.join(a.output_dir, "options.json"), "w") as f:
-        f.write(json.dumps(vars(a), sort_keys=True, indent=4))
+            for k, v in a._get_kwargs():
+                print(k, "=", v)
 
-    if a.mode == "export":
-        # export the generator to a meta graph that can be imported later for standalone generation
-        if a.lab_colorization:
-            raise Exception("export not supported for lab_colorization")
+            with open(os.path.join(a.output_dir, "options.json"), "w") as f:
+                f.write(json.dumps(vars(a), sort_keys=True, indent=4))
 
-        input = tf.placeholder(tf.string, shape=[1])
-        input_data = tf.decode_base64(input[0])
-        input_image = tf.image.decode_png(input_data)
+            if a.mode == "export":
+                # export the generator to a meta graph that can be imported later for standalone generation
 
-        # remove alpha channel if present
-        input_image = tf.cond(tf.equal(tf.shape(input_image)[2], 4), lambda: input_image[:,:,:3], lambda: input_image)
-        # convert grayscale to RGB
-        input_image = tf.cond(tf.equal(tf.shape(input_image)[2], 1), lambda: tf.image.grayscale_to_rgb(input_image), lambda: input_image)
+                input = tf.placeholder(tf.string, shape=[1])
+                input_data = tf.decode_base64(input[0])
+                input_image = tf.image.decode_png(input_data)
 
-        input_image = tf.image.convert_image_dtype(input_image, dtype=tf.float32)
-        input_image.set_shape([CROP_SIZE, CROP_SIZE, 3])
-        batch_input = tf.expand_dims(input_image, axis=0)
+                # remove alpha channel if present
+                input_image = tf.cond(tf.equal(tf.shape(input_image)[2], 4), lambda: input_image[:,:,:3], lambda: input_image)
+                # convert grayscale to RGB
+                input_image = tf.cond(tf.equal(tf.shape(input_image)[2], 1), lambda: tf.image.grayscale_to_rgb(input_image), lambda: input_image)
 
-        with tf.variable_scope("generator"):
-            batch_output = deprocess(create_generator(preprocess(batch_input), 3))
+                input_image = tf.image.convert_image_dtype(input_image, dtype=tf.float32)
+                input_image.set_shape([CROP_SIZE, CROP_SIZE, 3])
+                batch_input = tf.expand_dims(input_image, axis=0)
 
-        output_image = tf.image.convert_image_dtype(batch_output, dtype=tf.uint8)[0]
-        if a.output_filetype == "png":
-            output_data = tf.image.encode_png(output_image)
-        elif a.output_filetype == "jpeg":
-            output_data = tf.image.encode_jpeg(output_image, quality=80)
-        else:
-            raise Exception("invalid filetype")
-        output = tf.convert_to_tensor([tf.encode_base64(output_data)])
+                with tf.variable_scope("generator"):
+                    batch_output = deprocess(create_generator(num_generator_filters, preprocess(batch_input), 3))
 
-        key = tf.placeholder(tf.string, shape=[1])
-        inputs = {
-            "key": key.name,
-            "input": input.name
-        }
-        tf.add_to_collection("inputs", json.dumps(inputs))
-        outputs = {
-            "key":  tf.identity(key).name,
-            "output": output.name,
-        }
-        tf.add_to_collection("outputs", json.dumps(outputs))
+                output_image = tf.image.convert_image_dtype(batch_output, dtype=tf.uint8)[0]
+                if a.output_filetype == "png":
+                    output_data = tf.image.encode_png(output_image)
+                elif a.output_filetype == "jpeg":
+                    output_data = tf.image.encode_jpeg(output_image, quality=80)
+                else:
+                    raise Exception("invalid filetype")
+                output = tf.convert_to_tensor([tf.encode_base64(output_data)])
 
-        init_op = tf.global_variables_initializer()
-        restore_saver = tf.train.Saver()
-        export_saver = tf.train.Saver()
+                key = tf.placeholder(tf.string, shape=[1])
+                inputs = {
+                    "key": key.name,
+                    "input": input.name
+                }
+                tf.add_to_collection("inputs", json.dumps(inputs))
+                outputs = {
+                    "key":  tf.identity(key).name,
+                    "output": output.name,
+                }
+                tf.add_to_collection("outputs", json.dumps(outputs))
 
-        with tf.Session() as sess:
-            sess.run(init_op)
-            print("loading model from checkpoint")
-            checkpoint = tf.train.latest_checkpoint(a.checkpoint)
-            restore_saver.restore(sess, checkpoint)
-            print("exporting model")
-            export_saver.export_meta_graph(filename=os.path.join(a.output_dir, "export.meta"))
-            export_saver.save(sess, os.path.join(a.output_dir, "export"), write_meta_graph=False)
+                init_op = tf.global_variables_initializer()
+                restore_saver = tf.train.Saver()
+                export_saver = tf.train.Saver()
 
-        return
+                with tf.Session() as sess:
+                    sess.run(init_op)
+                    print("loading model from checkpoint")
+                    checkpoint = tf.train.latest_checkpoint(a.checkpoint)
+                    restore_saver.restore(sess, checkpoint)
+                    print("exporting model")
+                    export_saver.export_meta_graph(filename=os.path.join(a.output_dir, "export.meta"))
+                    export_saver.save(sess, os.path.join(a.output_dir, "export"), write_meta_graph=False)
 
-    examples = load_examples()
-    print("examples count = %d" % examples.count)
+                return
 
-    # inputs and targets are [batch_size, height, width, channels]
-    model = create_model(examples.inputs, examples.targets)
+            examples = load_examples(a.input_dir, a.mode, a.scale_size, a.batch_size)
+            print("examples count = %d" % examples.count)
 
-    # undo colorization splitting on images that we use for display/output
-    if a.lab_colorization:
-        if a.which_direction == "AtoB":
-            # inputs is brightness, this will be handled fine as a grayscale image
-            # need to augment targets and outputs with brightness
-            targets = augment(examples.targets, examples.inputs)
-            outputs = augment(model.outputs, examples.inputs)
-            # inputs can be deprocessed normally and handled as if they are single channel
-            # grayscale images
+            # inputs and targets are [batch_size, height, width, channels]
+            model = create_model(
+                examples.inputs,
+                examples.targets,
+                a.num_generator_filters,
+                a.num_discriminator_filters,
+                a.gan_weight,
+                a.l1_weight,
+                a.lr,
+                a.beta1)
+
+            # undo colorization splitting on images that we use for display/output
             inputs = deprocess(examples.inputs)
-        elif a.which_direction == "BtoA":
-            # inputs will be color channels only, get brightness from targets
-            inputs = augment(examples.inputs, examples.targets)
             targets = deprocess(examples.targets)
             outputs = deprocess(model.outputs)
-        else:
-            raise Exception("invalid direction")
-    else:
-        inputs = deprocess(examples.inputs)
-        targets = deprocess(examples.targets)
-        outputs = deprocess(model.outputs)
 
-    def convert(image):
-        if a.aspect_ratio != 1.0:
-            # upscale to correct aspect ratio
-            size = [CROP_SIZE, int(round(CROP_SIZE * a.aspect_ratio))]
-            image = tf.image.resize_images(image, size=size, method=tf.image.ResizeMethod.BICUBIC)
+            def convert(image):
+                if a.aspect_ratio != 1.0:
+                    # upscale to correct aspect ratio
+                    size = [CROP_SIZE, int(round(CROP_SIZE * a.aspect_ratio))]
+                    image = tf.image.resize_images(image, size=size, method=tf.image.ResizeMethod.BICUBIC)
 
-        return tf.image.convert_image_dtype(image, dtype=tf.uint8, saturate=True)
+                return tf.image.convert_image_dtype(image, dtype=tf.uint8, saturate=True)
 
-    # reverse any processing on images so they can be written to disk or displayed to user
-    with tf.name_scope("convert_inputs"):
-        converted_inputs = convert(inputs)
+            # reverse any processing on images so they can be written to disk or displayed to user
+            with tf.name_scope("convert_inputs"):
+                converted_inputs = convert(inputs)
 
-    with tf.name_scope("convert_targets"):
-        converted_targets = convert(targets)
+            with tf.name_scope("convert_targets"):
+                converted_targets = convert(targets)
 
-    with tf.name_scope("convert_outputs"):
-        converted_outputs = convert(outputs)
+            with tf.name_scope("convert_outputs"):
+                converted_outputs = convert(outputs)
 
-    with tf.name_scope("encode_images"):
-        display_fetches = {
-            "paths": examples.paths,
-            "inputs": tf.map_fn(tf.image.encode_png, converted_inputs, dtype=tf.string, name="input_pngs"),
-            "targets": tf.map_fn(tf.image.encode_png, converted_targets, dtype=tf.string, name="target_pngs"),
-            "outputs": tf.map_fn(tf.image.encode_png, converted_outputs, dtype=tf.string, name="output_pngs"),
-        }
+            with tf.name_scope("encode_images"):
+                display_fetches = {
+                    "paths": examples.paths,
+                    "inputs": tf.map_fn(tf.image.encode_png, converted_inputs, dtype=tf.string, name="input_pngs"),
+                    "targets": tf.map_fn(tf.image.encode_png, converted_targets, dtype=tf.string, name="target_pngs"),
+                    "outputs": tf.map_fn(tf.image.encode_png, converted_outputs, dtype=tf.string, name="output_pngs"),
+                }
 
-    # summaries
-    with tf.name_scope("inputs_summary"):
-        tf.summary.image("inputs", converted_inputs)
+            # summaries
+            with tf.name_scope("inputs_summary"):
+                tf.summary.image("inputs", converted_inputs)
 
-    with tf.name_scope("targets_summary"):
-        tf.summary.image("targets", converted_targets)
+            with tf.name_scope("targets_summary"):
+                tf.summary.image("targets", converted_targets)
 
-    with tf.name_scope("outputs_summary"):
-        tf.summary.image("outputs", converted_outputs)
+            with tf.name_scope("outputs_summary"):
+                tf.summary.image("outputs", converted_outputs)
 
-    with tf.name_scope("predict_real_summary"):
-        tf.summary.image("predict_real", tf.image.convert_image_dtype(model.predict_real, dtype=tf.uint8))
+            with tf.name_scope("predict_real_summary"):
+                tf.summary.image("predict_real", tf.image.convert_image_dtype(model.predict_real, dtype=tf.uint8))
 
-    with tf.name_scope("predict_fake_summary"):
-        tf.summary.image("predict_fake", tf.image.convert_image_dtype(model.predict_fake, dtype=tf.uint8))
+            with tf.name_scope("predict_fake_summary"):
+                tf.summary.image("predict_fake", tf.image.convert_image_dtype(model.predict_fake, dtype=tf.uint8))
 
-    tf.summary.scalar("discriminator_loss", model.discrim_loss)
-    tf.summary.scalar("generator_loss_GAN", model.gen_loss_GAN)
-    tf.summary.scalar("generator_loss_L1", model.gen_loss_L1)
+            tf.summary.scalar("discriminator_loss", model.discrim_loss)
+            tf.summary.scalar("generator_loss_GAN", model.gen_loss_GAN)
+            tf.summary.scalar("generator_loss_L1", model.gen_loss_L1)
 
-    for var in tf.trainable_variables():
-        tf.summary.histogram(var.op.name + "/values", var)
+            for var in tf.trainable_variables():
+                tf.summary.histogram(var.op.name + "/values", var)
 
-    for grad, var in model.discrim_grads_and_vars + model.gen_grads_and_vars:
-        tf.summary.histogram(var.op.name + "/gradients", grad)
+            for grad, var in model.discrim_grads_and_vars + model.gen_grads_and_vars:
+                tf.summary.histogram(var.op.name + "/gradients", grad)
 
-    with tf.name_scope("parameter_count"):
-        parameter_count = tf.reduce_sum([tf.reduce_prod(tf.shape(v)) for v in tf.trainable_variables()])
+            with tf.name_scope("parameter_count"):
+                parameter_count = tf.reduce_sum([tf.reduce_prod(tf.shape(v)) for v in tf.trainable_variables()])
 
-    saver = tf.train.Saver(max_to_keep=1)
+            saver = tf.train.Saver(max_to_keep=1)
 
     logdir = a.output_dir if (a.trace_freq > 0 or a.summary_freq > 0) else None
     sv = tf.train.Supervisor(logdir=logdir, save_summaries_secs=0, saver=None)
@@ -738,7 +694,7 @@ def main():
             max_steps = min(examples.steps_per_epoch, max_steps)
             for step in range(max_steps):
                 results = sess.run(display_fetches)
-                filesets = save_images(results)
+                filesets = save_images(results, a.output_dir)
                 for i, f in enumerate(filesets):
                     print("evaluated image", f["name"])
                 index_path = append_index(filesets)
@@ -782,7 +738,7 @@ def main():
 
                 if should(a.display_freq):
                     print("saving display images")
-                    filesets = save_images(results["display"], step=results["global_step"])
+                    filesets = save_images(results["display"], a.output_dir, step=results["global_step"])
                     append_index(filesets, step=True)
 
                 if should(a.trace_freq):
@@ -808,4 +764,96 @@ def main():
                     break
 
 
-main()
+
+
+                
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input_dir", help="path to folder containing images")
+    parser.add_argument("--mode", required=True, choices=["train", "test", "export"])
+    parser.add_argument("--output_dir", required=True, help="where to put output files")
+    parser.add_argument("--seed", type=int)
+    parser.add_argument("--checkpoint", default=None, help="directory with checkpoint to resume training from or use for testing")
+
+    parser.add_argument("--max_steps", type=int, help="number of training steps (0 to disable)")
+    parser.add_argument("--max_epochs", type=int, help="number of training epochs")
+    parser.add_argument("--summary_freq", type=int, default=100, help="update summaries every summary_freq steps")
+    parser.add_argument("--progress_freq", type=int, default=50, help="display progress every progress_freq steps")
+    parser.add_argument("--trace_freq", type=int, default=0, help="trace execution every trace_freq steps")
+    parser.add_argument("--display_freq", type=int, default=0, help="write current training images every display_freq steps")
+    parser.add_argument("--save_freq", type=int, default=5000, help="save model every save_freq steps, 0 to disable")
+
+    parser.add_argument("--aspect_ratio", type=float, default=1.0, help="aspect ratio of output images (width/height)")
+    parser.add_argument("--batch_size", type=int, default=1, help="number of images in batch")
+    parser.add_argument("--which_direction", type=str, default="AtoB", choices=["AtoB", "BtoA"])
+    parser.add_argument("--num_generator_filters", type=int, default=64, help="number of generator filters in first conv layer")
+    parser.add_argument("--num_discriminator_filters", type=int, default=64, help="number of discriminator filters in first conv layer")
+    parser.add_argument("--scale_size", type=int, default=286, help="scale images to this size before cropping to 256x256")
+    parser.add_argument("--flip", dest="flip", action="store_true", help="flip images horizontally")
+    parser.add_argument("--no_flip", dest="flip", action="store_false", help="don't flip images horizontally")
+    parser.set_defaults(flip=True)
+    parser.add_argument("--lr", type=float, default=0.0002, help="initial learning rate for adam")
+    parser.add_argument("--beta1", type=float, default=0.5, help="momentum term of adam")
+    parser.add_argument("--l1_weight", type=float, default=100.0, help="weight on L1 term for generator gradient")
+    parser.add_argument("--gan_weight", type=float, default=1.0, help="weight on GAN term for generator gradient")
+    parser.add_argument("--output_filetype", default="png", choices=["png", "jpeg"])
+    parser.add_argument('--verbosity',
+                        choices=[
+                            'DEBUG',
+                            'ERROR',
+                            'FATAL',
+                            'INFO',
+                            'WARN'
+                        ],
+                        default='INFO',
+                        help='Set logging verbosity')
+
+    a, unknown = parser.parse_known_args()
+
+    tf.logging.set_verbosity(a.verbosity)
+    # Set C++ Graph Execution level verbosity
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = str(
+        tf.logging.__dict__[a.verbosity] / 10)
+
+    # export options
+
+    del a.verbosity
+
+    if unknown:
+        tf.logging.warn('Unknown arguments: {}'.format(unknown))
+
+    tf_config = os.environ.get('TF_CONFIG')
+
+    # If TF_CONFIG is not available run local
+    if not tf_config:
+        run('', True, "local", a=a)
+    else :
+        tf_config_json = json.loads(tf_config)
+
+        cluster = tf_config_json.get('cluster')
+        job_name = tf_config_json.get('task', {}).get('type')
+        task_index = tf_config_json.get('task', {}).get('index')
+
+        # If cluster information is empty run local
+        if job_name is None or task_index is None:
+          run('', False, job_name ,a=a)
+        else:
+            cluster_spec = tf.train.ClusterSpec(cluster)
+            server = tf.train.Server(cluster_spec,
+                                       job_name=job_name,
+                                       task_index=task_index)
+
+            # Wait for incoming connections forever
+            # Worker ships the graph to the ps server
+            # The ps server manages the parameters of the model.
+            #
+            # See a detailed video on distributed TensorFlow
+            # https://www.youtube.com/watch?v=la_M6bCV91M
+            if job_name == 'ps':
+                server.join()           
+            elif job_name in ['master', 'worker']:
+                run(server.target, job_name == 'master', job_name, a=a)
+
+
+
