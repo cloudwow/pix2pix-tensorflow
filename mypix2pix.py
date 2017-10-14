@@ -14,14 +14,15 @@ import random
 import collections
 import math
 import time
+import threading
 
 BASE_DIR="gs://pix2pixdata"
 EPS = 1e-12
+
 CROP_SIZE = 256
 
 Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch")
 Model = collections.namedtuple("Model", "outputs, predict_real, predict_fake, discrim_loss, discrim_grads_and_vars, gen_loss_GAN, gen_loss_L1, gen_grads_and_vars, train, global_step")
-
 
 def preprocess(image):
     with tf.name_scope("preprocess"):
@@ -34,29 +35,6 @@ def deprocess(image):
         # [-1, 1] => [0, 1]
         return (image + 1) / 2
 
-
-def preprocess_lab(lab):
-    with tf.name_scope("preprocess_lab"):
-        L_chan, a_chan, b_chan = tf.unstack(lab, axis=2)
-        # L_chan: black and white with input range [0, 100]
-        # a_chan/b_chan: color channels with input range ~[-110, 110], not exact
-        # [0, 100] => [-1, 1],  ~[-110, 110] => [-1, 1]
-        return [L_chan / 50 - 1, a_chan / 110, b_chan / 110]
-
-
-def deprocess_lab(L_chan, a_chan, b_chan):
-    with tf.name_scope("deprocess_lab"):
-        # this is axis=3 instead of axis=2 because we process individual images but deprocess batches
-        return tf.stack([(L_chan + 1) / 2 * 100, a_chan * 110, b_chan * 110], axis=3)
-
-
-def augment(image, brightness):
-    # (a, b) color channels, combine with L channel and convert to rgb
-    a_chan, b_chan = tf.unstack(image, axis=3)
-    L_chan = tf.squeeze(brightness, axis=3)
-    lab = deprocess_lab(L_chan, a_chan, b_chan)
-    rgb = lab_to_rgb(lab)
-    return rgb
 
 
 def conv(batch_input, out_channels, stride):
@@ -120,92 +98,10 @@ def check_image(image):
     image.set_shape(shape)
     return image
 
-# based on https://github.com/torch/image/blob/9f65c30167b2048ecbe8b7befdc6b2d6d12baee9/generic/image.c
-def rgb_to_lab(srgb):
-    with tf.name_scope("rgb_to_lab"):
-        srgb = check_image(srgb)
-        srgb_pixels = tf.reshape(srgb, [-1, 3])
-
-        with tf.name_scope("srgb_to_xyz"):
-            linear_mask = tf.cast(srgb_pixels <= 0.04045, dtype=tf.float32)
-            exponential_mask = tf.cast(srgb_pixels > 0.04045, dtype=tf.float32)
-            rgb_pixels = (srgb_pixels / 12.92 * linear_mask) + (((srgb_pixels + 0.055) / 1.055) ** 2.4) * exponential_mask
-            rgb_to_xyz = tf.constant([
-                #    X        Y          Z
-                [0.412453, 0.212671, 0.019334], # R
-                [0.357580, 0.715160, 0.119193], # G
-                [0.180423, 0.072169, 0.950227], # B
-            ])
-            xyz_pixels = tf.matmul(rgb_pixels, rgb_to_xyz)
-
-        # https://en.wikipedia .org/wiki/Lab_color_space#CIELAB-CIEXYZ_conversions
-        with tf.name_scope("xyz_to_cielab"):
-            # convert to fx = f(X/Xn), fy = f(Y/Yn), fz = f(Z/Zn)
-
-            # normalize for D65 white point
-            xyz_normalized_pixels = tf.multiply(xyz_pixels, [1/0.950456, 1.0, 1/1.088754])
-
-            epsilon = 6/29
-            linear_mask = tf.cast(xyz_normalized_pixels <= (epsilon**3), dtype=tf.float32)
-            exponential_mask = tf.cast(xyz_normalized_pixels > (epsilon**3), dtype=tf.float32)
-            fxfyfz_pixels = (xyz_normalized_pixels / (3 * epsilon**2) + 4/29) * linear_mask + (xyz_normalized_pixels ** (1/3)) * exponential_mask
-
-            # convert to lab
-            fxfyfz_to_lab = tf.constant([
-                #  l       a       b
-                [  0.0,  500.0,    0.0], # fx
-                [116.0, -500.0,  200.0], # fy
-                [  0.0,    0.0, -200.0], # fz
-            ])
-            lab_pixels = tf.matmul(fxfyfz_pixels, fxfyfz_to_lab) + tf.constant([-16.0, 0.0, 0.0])
-
-        return tf.reshape(lab_pixels, tf.shape(srgb))
-
-
-def lab_to_rgb(lab):
-    with tf.name_scope("lab_to_rgb"):
-        lab = check_image(lab)
-        lab_pixels = tf.reshape(lab, [-1, 3])
-
-        # https://en.wikipedia.org/wiki/Lab_color_space#CIELAB-CIEXYZ_conversions
-        with tf.name_scope("cielab_to_xyz"):
-            # convert to fxfyfz
-            lab_to_fxfyfz = tf.constant([
-                #   fx      fy        fz
-                [1/116.0, 1/116.0,  1/116.0], # l
-                [1/500.0,     0.0,      0.0], # a
-                [    0.0,     0.0, -1/200.0], # b
-            ])
-            fxfyfz_pixels = tf.matmul(lab_pixels + tf.constant([16.0, 0.0, 0.0]), lab_to_fxfyfz)
-
-            # convert to xyz
-            epsilon = 6/29
-            linear_mask = tf.cast(fxfyfz_pixels <= epsilon, dtype=tf.float32)
-            exponential_mask = tf.cast(fxfyfz_pixels > epsilon, dtype=tf.float32)
-            xyz_pixels = (3 * epsilon**2 * (fxfyfz_pixels - 4/29)) * linear_mask + (fxfyfz_pixels ** 3) * exponential_mask
-
-            # denormalize for D65 white point
-            xyz_pixels = tf.multiply(xyz_pixels, [0.950456, 1.0, 1.088754])
-
-        with tf.name_scope("xyz_to_srgb"):
-            xyz_to_rgb = tf.constant([
-                #     r           g          b
-                [ 3.2404542, -0.9692660,  0.0556434], # x
-                [-1.5371385,  1.8760108, -0.2040259], # y
-                [-0.4985314,  0.0415560,  1.0572252], # z
-            ])
-            rgb_pixels = tf.matmul(xyz_pixels, xyz_to_rgb)
-            # avoid a slightly negative number messing up the conversion
-            rgb_pixels = tf.clip_by_value(rgb_pixels, 0.0, 1.0)
-            linear_mask = tf.cast(rgb_pixels <= 0.0031308, dtype=tf.float32)
-            exponential_mask = tf.cast(rgb_pixels > 0.0031308, dtype=tf.float32)
-            srgb_pixels = (rgb_pixels * 12.92 * linear_mask) + ((rgb_pixels ** (1/2.4) * 1.055) - 0.055) * exponential_mask
-
-        return tf.reshape(srgb_pixels, tf.shape(lab))
-
 
 def load_examples(input_dir, mode, scale_size, batch_size):
-
+    input_dir = input_dir+"/"+mode+"_images"
+    print("input dir for mode "+mode+" is "+input_dir)
     input_paths = []
     input_paths.extend(file_io.get_matching_files(input_dir+"/*.jpg"))
     decode = tf.image.decode_jpeg
@@ -498,11 +394,112 @@ def append_index(filesets, step=False):
         index.write("</tr>")
     return index_path
 
+class EvaluationRunHook(tf.train.SessionRunHook):
+  """EvaluationRunHook performs continuous evaluation of the model.
+
+  Args:
+    checkpoint_dir (string): Dir to store model checkpoints
+    metric_dir (string): Dir to store metrics like accuracy and auroc
+    graph (tf.Graph): Evaluation graph
+    eval_frequency (int): Frequency of evaluation every n train steps
+    eval_steps (int): Evaluation steps to be performed
+  """
+  def __init__(self,
+               checkpoint_dir,
+               model,
+               examples,
+               graph,
+               eval_frequency,
+               eval_steps=None):
+
+    self._eval_steps = eval_steps
+    self._checkpoint_dir = checkpoint_dir
+    self._eval_every = eval_frequency
+    self._latest_checkpoint = None
+    self._checkpoints_since_eval = 0
+    self._graph = graph
+    self._model = model
+
+    # With the graph object as default graph
+    # See https://www.tensorflow.org/api_docs/python/tf/Graph#as_default
+    # Adds ops to the graph object
+    with graph.as_default():
+                          # undo colorization splitting on images that we use for display/output
+        inputs = deprocess(examples.inputs)
+        targets = deprocess(examples.targets)
+        outputs = deprocess(model.outputs)
+
+        def convert(image):
+            if a.aspect_ratio != 1.0:
+                # upscale to correct aspect ratio
+                size = [CROP_SIZE, int(round(CROP_SIZE * a.aspect_ratio))]
+                image = tf.image.resize_images(image, size=size, method=tf.image.ResizeMethod.BICUBIC)
+
+            return tf.image.convert_image_dtype(image, dtype=tf.uint8, saturate=True)
+
+        # reverse any processing on images so they can be written to disk or displayed to user
+        with tf.name_scope("convert_inputs"):
+            self.converted_inputs = convert(inputs)
+
+        with tf.name_scope("convert_targets"):
+            self.converted_targets = convert(targets)
+
+        with tf.name_scope("convert_outputs"):
+            self.converted_outputs = convert(outputs)
+
+        with tf.name_scope("encode_images"):
+           self.display_fetches = {
+                "paths": examples.paths,
+                "inputs": tf.map_fn(tf.image.encode_png, self.converted_inputs, dtype=tf.string, name="input_pngs"),
+                "targets": tf.map_fn(tf.image.encode_png, self.converted_targets, dtype=tf.string, name="target_pngs"),
+                "outputs": tf.map_fn(tf.image.encode_png, self.converted_outputs, dtype=tf.string, name="output_pngs"),
+            }
+
+    # Saver class add ops to save and restore
+    # variables to and from checkpoint
+    self._saver = tf.train.Saver()
+
+    # Creates a global step to contain a counter for
+    # the global training step
+    self._gs = tf.contrib.framework.get_or_create_global_step()
+
+    print("setting up locks...")
+    # MonitoredTrainingSession runs hooks in background threads
+    # and it doesn't wait for the thread from the last session.run()
+    # call to terminate to invoke the next hook, hence locks.
+    self._eval_lock = threading.Lock()
+    self._checkpoint_lock = threading.Lock()
+    print("done setting up locks")
+
+
+  def end(self, session):
+    """Called at then end of session to make sure we always evaluate."""
+    print("hook end")
+
+    with self._eval_lock:
+      self._run_eval()
+
+  def _run_eval(self):
+    """Run model evaluation and generate summaries."""
+    print("Hook running eval")
+    coord = tf.train.Coordinator(clean_stop_exception_types=(
+        tf.errors.CancelledError, tf.errors.OutOfRangeError))
+
+    with tf.Session(graph=self._graph) as session:
+      # Restores previously saved variables from latest checkpoint
+      self._saver.restore(session, self._latest_checkpoint)
+
+      result = session.run(self.display_fetches)
+      filesets = save_images(results["display"], output_dir, step=results["global_step"])
+      append_index(filesets, step=True)
+      train_step = session.run(self._gs)
+
 
 def run(target, is_chief, job_name, a):
-    input_dir = BASE_DIR+"/"+a.topic+"/train_images"
+    input_dir = BASE_DIR+"/"+a.topic
     output_dir = BASE_DIR+"/"+a.topic+"/output"
-    with tf.Graph().as_default():
+    graph=tf.Graph()
+    with graph.as_default():
         # Placement of ops on devices using replica device setter
         # which automatically places the parameters on the `ps` server
         # and the `ops` on the workers
@@ -524,83 +521,44 @@ def run(target, is_chief, job_name, a):
             if not os.path.exists(output_dir):
                 os.makedirs(output_dir)
 
-            if a.mode == "test" or a.mode == "export":
-                if a.checkpoint is None:
-                    raise Exception("checkpoint required for test mode")
-
-                # load some options from the checkpoint
-                options = {"which_direction", "num_generator_filters", "num_discriminator_filters"}
-                with open(os.path.join(a.checkpoint, "options.json")) as f:
-                    for key, val in json.loads(f.read()).items():
-                        if key in options:
-                            print("loaded", key, "=", val)
-                            setattr(a, key, val)
-                # disable these features in test mode
-                a.scale_size = CROP_SIZE
-                a.flip = False
-
             for k, v in a._get_kwargs():
                 print(k, "=", v)
 
             with open(os.path.join(output_dir, "options.json"), "w") as f:
                 f.write(json.dumps(vars(a), sort_keys=True, indent=4))
 
-            if a.mode == "export":
-                # export the generator to a meta graph that can be imported later for standalone generation
+            if is_chief:
+                evaluation_graph = tf.Graph()
+                with evaluation_graph.as_default():
 
-                input = tf.placeholder(tf.string, shape=[1])
-                input_data = tf.decode_base64(input[0])
-                input_image = tf.image.decode_png(input_data)
+                    examples = load_examples(input_dir, "test", a.scale_size, a.batch_size)
+                    print("tests examples count = %d" % examples.count)
 
-                # remove alpha channel if present
-                input_image = tf.cond(tf.equal(tf.shape(input_image)[2], 4), lambda: input_image[:,:,:3], lambda: input_image)
-                # convert grayscale to RGB
-                input_image = tf.cond(tf.equal(tf.shape(input_image)[2], 1), lambda: tf.image.grayscale_to_rgb(input_image), lambda: input_image)
+                    # inputs and targets are [batch_size, height, width, channels]
+                    model = create_model(
+                        examples.inputs,
+                        examples.targets,
+                        a.num_generator_filters,
+                        a.num_discriminator_filters,
+                        a.gan_weight,
+                        a.l1_weight,
+                        a.lr,
+                        a.beta1)
 
-                input_image = tf.image.convert_image_dtype(input_image, dtype=tf.float32)
-                input_image.set_shape([CROP_SIZE, CROP_SIZE, 3])
-                batch_input = tf.expand_dims(input_image, axis=0)
 
-                with tf.variable_scope("generator"):
-                    batch_output = deprocess(create_generator(num_generator_filters, preprocess(batch_input), 3))
+                    hooks = [EvaluationRunHook(
+                            output_dir,                    
+                            model,
+                            examples,
+                            evaluation_graph,
+                            200,
+                            2,
+                        )]
 
-                output_image = tf.image.convert_image_dtype(batch_output, dtype=tf.uint8)[0]
-                if a.output_filetype == "png":
-                    output_data = tf.image.encode_png(output_image)
-                elif a.output_filetype == "jpeg":
-                    output_data = tf.image.encode_jpeg(output_image, quality=80)
-                else:
-                    raise Exception("invalid filetype")
-                output = tf.convert_to_tensor([tf.encode_base64(output_data)])
+            else:
+                hooks = []
 
-                key = tf.placeholder(tf.string, shape=[1])
-                inputs = {
-                    "key": key.name,
-                    "input": input.name
-                }
-                tf.add_to_collection("inputs", json.dumps(inputs))
-                outputs = {
-                    "key":  tf.identity(key).name,
-                    "output": output.name,
-                }
-                tf.add_to_collection("outputs", json.dumps(outputs))
-
-                init_op = tf.global_variables_initializer()
-                restore_saver = tf.train.Saver()
-                export_saver = tf.train.Saver()
-
-                with tf.Session() as session:
-                    session.run(init_op)
-                    print("loading model from checkpoint")
-                    checkpoint = tf.train.latest_checkpoint(a.checkpoint)
-                    restore_saver.restore(session, checkpoint)
-                    print("exporting model")
-                    export_saver.export_meta_graph(filename=os.path.join(output_dir, "export.meta"))
-                    export_saver.save(session, os.path.join(output_dir, "export"), write_meta_graph=False)
-
-                return
-
-            examples = load_examples(input_dir, a.mode, a.scale_size, a.batch_size)
+            examples = load_examples(input_dir, "train", a.scale_size, a.batch_size)
             print("examples count = %d" % examples.count)
 
             # inputs and targets are [batch_size, height, width, channels]
@@ -613,50 +571,6 @@ def run(target, is_chief, job_name, a):
                 a.l1_weight,
                 a.lr,
                 a.beta1)
-
-            # undo colorization splitting on images that we use for display/output
-            inputs = deprocess(examples.inputs)
-            targets = deprocess(examples.targets)
-            outputs = deprocess(model.outputs)
-
-            def convert(image):
-                if a.aspect_ratio != 1.0:
-                    # upscale to correct aspect ratio
-                    size = [CROP_SIZE, int(round(CROP_SIZE * a.aspect_ratio))]
-                    image = tf.image.resize_images(image, size=size, method=tf.image.ResizeMethod.BICUBIC)
-
-                return tf.image.convert_image_dtype(image, dtype=tf.uint8, saturate=True)
-
-            # reverse any processing on images so they can be written to disk or displayed to user
-            with tf.name_scope("convert_inputs"):
-                converted_inputs = convert(inputs)
-
-            with tf.name_scope("convert_targets"):
-                converted_targets = convert(targets)
-
-            with tf.name_scope("convert_outputs"):
-                converted_outputs = convert(outputs)
-
-            with tf.name_scope("encode_images"):
-                display_fetches = {
-                    "paths": examples.paths,
-                    "inputs": tf.map_fn(tf.image.encode_png, converted_inputs, dtype=tf.string, name="input_pngs"),
-                    "targets": tf.map_fn(tf.image.encode_png, converted_targets, dtype=tf.string, name="target_pngs"),
-                    "outputs": tf.map_fn(tf.image.encode_png, converted_outputs, dtype=tf.string, name="output_pngs"),
-                }
-
-            # summaries
-            with tf.name_scope("inputs_summary"):
-                tf.summary.image("inputs", converted_inputs)
-
-            with tf.name_scope("targets_summary"):
-                tf.summary.image("targets", converted_targets)
-
-            with tf.name_scope("outputs_summary"):
-                tf.summary.image("outputs", converted_outputs)
-
-            with tf.name_scope("predict_real_summary"):
-                tf.summary.image("predict_real", tf.image.convert_image_dtype(model.predict_real, dtype=tf.uint8))
 
             with tf.name_scope("predict_fake_summary"):
                 tf.summary.image("predict_fake", tf.image.convert_image_dtype(model.predict_fake, dtype=tf.uint8))
@@ -677,11 +591,12 @@ def run(target, is_chief, job_name, a):
             saver = tf.train.Saver(max_to_keep=1)
 
             logdir = output_dir if (a.trace_freq > 0 or a.summary_freq > 0) else None
+
             with tf.train.MonitoredTrainingSession(master=target,
                                                    is_chief=is_chief,
                                                    checkpoint_dir=output_dir,
                                                    hooks=[],
-                                                   save_checkpoint_secs=200,
+                                                   save_checkpoint_secs=2000,
                                                    save_summaries_steps=50) as session:
 
                 print("monitored session created.")
@@ -700,83 +615,71 @@ def run(target, is_chief, job_name, a):
                 if a.max_steps is not None:
                     max_steps = a.max_steps
 
-                if a.mode == "test":
-                    # testing
-                    # at most, process the test data once
-                    max_steps = min(examples.steps_per_epoch, max_steps)
-                    for step in range(max_steps):
-                        results = session.run(display_fetches)
-                        filesets = save_images(results, output_dir)
-                        for i, f in enumerate(filesets):
-                            print("evaluated image", f["name"])
-                        index_path = append_index(filesets)
 
-                    print("wrote index at", index_path)
-                else:
-                    # training
-                    start = time.time()
-                    print("here we go")
+                # training
+                start = time.time()
+                print("here we go")
 
-                    for step in range(max_steps):
-                        print("step: " + str(step))
-                        def should(freq):
-                            return freq > 0 and ((step + 1) % freq == 0 or step == max_steps - 1)
+                for step in range(max_steps):
+                    print("step: " + str(step))
+                    def should(freq):
+                        return freq > 0 and ((step + 1) % freq == 0 or step == max_steps - 1)
 
-                        options = None
-                        run_metadata = None
-                        if should(a.trace_freq):
-                            options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-                            run_metadata = tf.RunMetadata()
+                    options = None
+                    run_metadata = None
+                    if should(a.trace_freq):
+                        options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+                        run_metadata = tf.RunMetadata()
 
-                        fetches = {
-                            "train": model.train,
-                            "global_step": model.global_step,
-                        }
+                    fetches = {
+                        "train": model.train,
+                        "global_step": model.global_step,
+                    }
 
-                        if should(a.progress_freq):
-                            fetches["discrim_loss"] = model.discrim_loss
-                            fetches["gen_loss_GAN"] = model.gen_loss_GAN
-                            fetches["gen_loss_L1"] = model.gen_loss_L1
+                    if should(a.progress_freq):
+                        fetches["discrim_loss"] = model.discrim_loss
+                        fetches["gen_loss_GAN"] = model.gen_loss_GAN
+                        fetches["gen_loss_L1"] = model.gen_loss_L1
 
-                        if should(a.summary_freq):
-#                            fetches["summary"] = sv.summary_op
-                            print("should summary")
-                        if should(a.display_freq):
-                            fetches["display"] = display_fetches
+                    if should(a.summary_freq):
+                        #                            fetches["summary"] = sv.summary_op
+                        print("should summary")
+                    if should(a.display_freq):
+                        fetches["display"] = display_fetches
 
-                        results = session.run(fetches, options=options, run_metadata=run_metadata)
-                        print("global step: "+str(results["global_step"]))
-                        
-                        if should(a.summary_freq):
-                            print("recording summary")
-                        #    sv.summary_writer.add_summary(results["summary"], results["global_step"])
+                    results = session.run(fetches, options=options, run_metadata=run_metadata)
+                    print("global step: "+str(results["global_step"]))
 
-                        if should(a.display_freq):
-                            print("saving display images")
-                            filesets = save_images(results["display"], output_dir, step=results["global_step"])
-                            append_index(filesets, step=True)
+                    if should(a.summary_freq):
+                        print("recording summary")
+                    #    sv.summary_writer.add_summary(results["summary"], results["global_step"])
 
-                        if should(a.trace_freq):
-                            print("recording trace")
-                         #   sv.summary_writer.add_run_metadata(run_metadata, "step_%d" % results["global_step"])
+                    if should(a.display_freq):
+                        print("saving display images")
+                        filesets = save_images(results["display"], output_dir, step=results["global_step"])
+                        append_index(filesets, step=True)
 
-                        if should(a.progress_freq):
-                            # global_step will have the correct step count if we resume from a checkpoint
-                            train_epoch = math.ceil(results["global_step"] / examples.steps_per_epoch)
-                            train_step = (results["global_step"] - 1) % examples.steps_per_epoch + 1
-                            rate = (step + 1) * a.batch_size / (time.time() - start)
-                            remaining = (max_steps - step) * a.batch_size / rate
-                            print("progress  epoch %d  step %d  image/sec %0.1f  remaining %dm" % (train_epoch, train_step, rate, remaining / 60))
-                            print("discrim_loss", results["discrim_loss"])
-                            print("gen_loss_GAN", results["gen_loss_GAN"])
-                            print("gen_loss_L1", results["gen_loss_L1"])
+                    if should(a.trace_freq):
+                        print("recording trace")
+                     #   sv.summary_writer.add_run_metadata(run_metadata, "step_%d" % results["global_step"])
 
-                        if should(a.save_freq):
-                            print("saving model")
-#                            saver.save(session, os.path.join(output_dir, "model"), global_step=sv.global_step)
+                    if should(a.progress_freq):
+                        # global_step will have the correct step count if we resume from a checkpoint
+                        train_epoch = math.ceil(results["global_step"] / examples.steps_per_epoch)
+                        train_step = (results["global_step"] - 1) % examples.steps_per_epoch + 1
+                        rate = (step + 1) * a.batch_size / (time.time() - start)
+                        remaining = (max_steps - step) * a.batch_size / rate
+                        print("progress  epoch %d  step %d  image/sec %0.1f  remaining %dm" % (train_epoch, train_step, rate, remaining / 60))
+                        print("discrim_loss", results["discrim_loss"])
+                        print("gen_loss_GAN", results["gen_loss_GAN"])
+                        print("gen_loss_L1", results["gen_loss_L1"])
 
-                        if session.should_stop():
-                            break
+                    if should(a.save_freq):
+                        print("saving model")
+                        #                            saver.save(session, os.path.join(output_dir, "model"), global_step=sv.global_step)
+
+                    if session.should_stop():
+                        break
 
 
 
@@ -786,7 +689,6 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--topic", help="e.g. simpson. should match folder name in GCS")
-    parser.add_argument("--mode", required=True, choices=["train", "test", "export"])
     parser.add_argument("--seed", type=int)
     parser.add_argument("--checkpoint", default=None, help="directory with checkpoint to resume training from or use for testing")
 
