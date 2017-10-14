@@ -404,100 +404,187 @@ class EvaluationRunHook(tf.train.SessionRunHook):
     eval_frequency (int): Frequency of evaluation every n train steps
     eval_steps (int): Evaluation steps to be performed
   """
-  def __init__(self,
-               checkpoint_dir,
-               model,
-               examples,
-               graph,
-               eval_frequency,
-               eval_steps=None):
+  def __init__(self, graph, examples, model, checkpoint_dir, display_fetches ):
+      self.graph = graph
+      self.examples = examples
+      self.model = model
+      self._checkpoint_dir = checkpoint_dir   
+      self.output_dir  = checkpoint_dir
+      self.display_fetches = display_fetches
+      self._latest_checkpoint = None
+      self.step =0
+      # Saver class add ops to save and restore
+      # variables to and from checkpoint
+      with graph.as_default():
+          self._saver = tf.train.Saver()
+      self._eval_lock = threading.Lock()
+      self._checkpoint_lock = threading.Lock()
+      print("done setting up hook")
+  def _update_latest_checkpoint(self):
+      """Update the latest checkpoint file created in the output dir."""
+      if self._checkpoint_lock.acquire(False):
+          try:
+              latest = tf.train.latest_checkpoint(self._checkpoint_dir)
+              if not latest == self._latest_checkpoint:
+                  self._latest_checkpoint = latest
+          finally:
+              self._checkpoint_lock.release()
 
-    self._eval_steps = eval_steps
-    self._checkpoint_dir = checkpoint_dir
-    self._eval_every = eval_frequency
-    self._latest_checkpoint = None
-    self._checkpoints_since_eval = 0
-    self._graph = graph
-    self._model = model
+  def after_run(self, run_context, run_values):
+      print("hook after run")
+      self.step = self.step +1
+      if self.step%10 == 0:
+          self._update_latest_checkpoint()
+          if self._eval_lock.acquire(False):
+              try:
+                  self._run_eval()
+              finally:
+                  self._eval_lock.release()
+  def end(self, session):
+      """Called at then end of session to make sure we always evaluate."""
+      self._update_latest_checkpoint()
+      
+      with self._eval_lock:
+          self._run_eval()
 
-    # With the graph object as default graph
-    # See https://www.tensorflow.org/api_docs/python/tf/Graph#as_default
-    # Adds ops to the graph object
-    with graph.as_default():
-                          # undo colorization splitting on images that we use for display/output
-        inputs = deprocess(examples.inputs)
-        targets = deprocess(examples.targets)
-        outputs = deprocess(model.outputs)
-
-        def convert(image):
-            if a.aspect_ratio != 1.0:
-                # upscale to correct aspect ratio
-                size = [CROP_SIZE, int(round(CROP_SIZE * a.aspect_ratio))]
-                image = tf.image.resize_images(image, size=size, method=tf.image.ResizeMethod.BICUBIC)
-
-            return tf.image.convert_image_dtype(image, dtype=tf.uint8, saturate=True)
-
-        # reverse any processing on images so they can be written to disk or displayed to user
-        with tf.name_scope("convert_inputs"):
-            self.converted_inputs = convert(inputs)
-
-        with tf.name_scope("convert_targets"):
-            self.converted_targets = convert(targets)
-
-        with tf.name_scope("convert_outputs"):
-            self.converted_outputs = convert(outputs)
-
-        with tf.name_scope("encode_images"):
-           self.display_fetches = {
-                "paths": examples.paths,
-                "inputs": tf.map_fn(tf.image.encode_png, self.converted_inputs, dtype=tf.string, name="input_pngs"),
-                "targets": tf.map_fn(tf.image.encode_png, self.converted_targets, dtype=tf.string, name="target_pngs"),
-                "outputs": tf.map_fn(tf.image.encode_png, self.converted_outputs, dtype=tf.string, name="output_pngs"),
+  def _run_eval(self):
+        with tf.Session(graph=self.graph) as session:
+            self._saver.restore(session, self._latest_checkpoint)
+             
+            fetches = {
+                "train": self.model.train,
+                "global_step": self.model.global_step,
             }
 
-    # Saver class add ops to save and restore
-    # variables to and from checkpoint
-    self._saver = tf.train.Saver()
 
-    # Creates a global step to contain a counter for
-    # the global training step
-    self._gs = tf.contrib.framework.get_or_create_global_step()
+#            fetches["display"] = self.display_fetches
 
-    print("setting up locks...")
-    # MonitoredTrainingSession runs hooks in background threads
-    # and it doesn't wait for the thread from the last session.run()
-    # call to terminate to invoke the next hook, hence locks.
-    self._eval_lock = threading.Lock()
-    self._checkpoint_lock = threading.Lock()
-    print("done setting up locks")
+            print("running eval session...")
+            results = session.run(fetches)
+            print("global step: "+str(results["global_step"]))
+
+            #    sv.summary_writer.add_summary(results["summary"], results["global_step"])
+
+            print("saving display images")
+#            filesets = save_images(results["display"], self.output_dir, step=results["global_step"])
+#            append_index(filesets, step=True)
+
+
+
 
 
   def end(self, session):
     """Called at then end of session to make sure we always evaluate."""
     print("hook end")
 
-    with self._eval_lock:
-      self._run_eval()
+def add_stuff(examples, model):
+    
+    inputs = deprocess(examples.inputs)
+    targets = deprocess(examples.targets)
+    outputs = deprocess(model.outputs)
 
-  def _run_eval(self):
-    """Run model evaluation and generate summaries."""
-    print("Hook running eval")
-    coord = tf.train.Coordinator(clean_stop_exception_types=(
-        tf.errors.CancelledError, tf.errors.OutOfRangeError))
 
-    with tf.Session(graph=self._graph) as session:
-      # Restores previously saved variables from latest checkpoint
-      self._saver.restore(session, self._latest_checkpoint)
+    def convert(image):
+        if a.aspect_ratio != 1.0:
+            # upscale to correct aspect ratio
+            size = [CROP_SIZE, int(round(CROP_SIZE * a.aspect_ratio))]
+            image = tf.image.resize_images(image, size=size, method=tf.image.ResizeMethod.BICUBIC)
 
-      result = session.run(self.display_fetches)
-      filesets = save_images(results["display"], output_dir, step=results["global_step"])
-      append_index(filesets, step=True)
-      train_step = session.run(self._gs)
+        return tf.image.convert_image_dtype(image, dtype=tf.uint8, saturate=True)
 
+    # reverse any processing on images so they can be written to disk or displayed to user
+    with tf.name_scope("convert_inputs"):
+        converted_inputs = convert(inputs)
+
+    with tf.name_scope("convert_targets"):
+        converted_targets = convert(targets)
+
+    with tf.name_scope("convert_outputs"):
+        converted_outputs = convert(outputs)
+
+    with tf.name_scope("encode_images"):
+        display_fetches = {
+            "paths": examples.paths,
+            "inputs": tf.map_fn(tf.image.encode_png, converted_inputs, dtype=tf.string, name="input_pngs"),
+            "targets": tf.map_fn(tf.image.encode_png, converted_targets, dtype=tf.string, name="target_pngs"),
+            "outputs": tf.map_fn(tf.image.encode_png, converted_outputs, dtype=tf.string, name="output_pngs"),
+        }
+
+    # summaries
+    with tf.name_scope("inputs_summary"):
+        tf.summary.image("inputs", converted_inputs)
+
+    with tf.name_scope("targets_summary"):
+        tf.summary.image("targets", converted_targets)
+
+    with tf.name_scope("outputs_summary"):
+        tf.summary.image("outputs", converted_outputs)
+
+    with tf.name_scope("predict_real_summary"):
+        tf.summary.image("predict_real", tf.image.convert_image_dtype(model.predict_real, dtype=tf.uint8))
+
+
+    with tf.name_scope("predict_fake_summary"):
+        tf.summary.image("predict_fake", tf.image.convert_image_dtype(model.predict_fake, dtype=tf.uint8))
+
+    tf.summary.scalar("discriminator_loss", model.discrim_loss)
+    tf.summary.scalar("generator_loss_GAN", model.gen_loss_GAN)
+    tf.summary.scalar("generator_loss_L1", model.gen_loss_L1)
+
+    for var in tf.trainable_variables():
+        tf.summary.histogram(var.op.name + "/values", var)
+
+    for grad, var in model.discrim_grads_and_vars + model.gen_grads_and_vars:
+        tf.summary.histogram(var.op.name + "/gradients", grad)
+
+    with tf.name_scope("parameter_count"):
+        parameter_count = tf.reduce_sum([tf.reduce_prod(tf.shape(v)) for v in tf.trainable_variables()])
+    return display_fetches
 
 def run(target, is_chief, job_name, a):
     input_dir = BASE_DIR+"/"+a.topic
-    output_dir = BASE_DIR+"/"+a.topic+"/output"
+    output_dir = "./output"  #BASE_DIR+"/"+a.topic+"/output"
+
+    if tf.__version__.split('.')[0] != "1":
+        raise Exception("Tensorflow version 1 required")
+
+    if a.seed is None:
+        a.seed = random.randint(0, 2**31 - 1)
+
+    tf.set_random_seed(a.seed)
+    np.random.seed(a.seed)
+    random.seed(a.seed)
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    for k, v in a._get_kwargs():
+        print(k, "=", v)
+
+
+    if is_chief:
+
+        evaluation_graph = tf.Graph()
+        with evaluation_graph.as_default():
+
+            examples = load_examples(input_dir, "test", a.scale_size, a.batch_size)
+            model = create_model(
+                examples.inputs,
+                examples.targets,
+                a.num_generator_filters,
+                a.num_discriminator_filters,
+                a.gan_weight,
+                a.l1_weight,
+                a.lr,
+                a.beta1)
+            display_fetches = add_stuff(examples, model)
+
+
+            hooks = [EvaluationRunHook(evaluation_graph, examples, model, output_dir, display_fetches)]
+
+    else:
+        hooks = []
+
     graph=tf.Graph()
     with graph.as_default():
         # Placement of ops on devices using replica device setter
@@ -507,56 +594,6 @@ def run(target, is_chief, job_name, a):
         # See:
         # https://www.tensorflow.org/api_docs/python/tf/train/replica_device_setter
         with tf.device(tf.train.replica_device_setter()):
-
-            if tf.__version__.split('.')[0] != "1":
-                raise Exception("Tensorflow version 1 required")
-
-            if a.seed is None:
-                a.seed = random.randint(0, 2**31 - 1)
-
-            tf.set_random_seed(a.seed)
-            np.random.seed(a.seed)
-            random.seed(a.seed)
-
-            if not os.path.exists(output_dir):
-                os.makedirs(output_dir)
-
-            for k, v in a._get_kwargs():
-                print(k, "=", v)
-
-            with open(os.path.join(output_dir, "options.json"), "w") as f:
-                f.write(json.dumps(vars(a), sort_keys=True, indent=4))
-
-            if is_chief:
-                evaluation_graph = tf.Graph()
-                with evaluation_graph.as_default():
-
-                    examples = load_examples(input_dir, "test", a.scale_size, a.batch_size)
-                    print("tests examples count = %d" % examples.count)
-
-                    # inputs and targets are [batch_size, height, width, channels]
-                    model = create_model(
-                        examples.inputs,
-                        examples.targets,
-                        a.num_generator_filters,
-                        a.num_discriminator_filters,
-                        a.gan_weight,
-                        a.l1_weight,
-                        a.lr,
-                        a.beta1)
-
-
-                    hooks = [EvaluationRunHook(
-                            output_dir,                    
-                            model,
-                            examples,
-                            evaluation_graph,
-                            200,
-                            2,
-                        )]
-
-            else:
-                hooks = []
 
             examples = load_examples(input_dir, "train", a.scale_size, a.batch_size)
             print("examples count = %d" % examples.count)
@@ -571,23 +608,7 @@ def run(target, is_chief, job_name, a):
                 a.l1_weight,
                 a.lr,
                 a.beta1)
-
-            with tf.name_scope("predict_fake_summary"):
-                tf.summary.image("predict_fake", tf.image.convert_image_dtype(model.predict_fake, dtype=tf.uint8))
-
-            tf.summary.scalar("discriminator_loss", model.discrim_loss)
-            tf.summary.scalar("generator_loss_GAN", model.gen_loss_GAN)
-            tf.summary.scalar("generator_loss_L1", model.gen_loss_L1)
-
-            for var in tf.trainable_variables():
-                tf.summary.histogram(var.op.name + "/values", var)
-
-            for grad, var in model.discrim_grads_and_vars + model.gen_grads_and_vars:
-                tf.summary.histogram(var.op.name + "/gradients", grad)
-
-            with tf.name_scope("parameter_count"):
-                parameter_count = tf.reduce_sum([tf.reduce_prod(tf.shape(v)) for v in tf.trainable_variables()])
-
+            display_fetches = add_stuff(examples, model)
             saver = tf.train.Saver(max_to_keep=1)
 
             logdir = output_dir if (a.trace_freq > 0 or a.summary_freq > 0) else None
@@ -595,14 +616,13 @@ def run(target, is_chief, job_name, a):
             with tf.train.MonitoredTrainingSession(master=target,
                                                    is_chief=is_chief,
                                                    checkpoint_dir=output_dir,
-                                                   hooks=[],
+                                                   hooks=hooks,
                                                    save_checkpoint_secs=2000,
                                                    save_summaries_steps=50) as session:
 
                 print("monitored session created.")
 #            sv = tf.train.Supervisor(logdir=logdir, save_summaries_secs=0, saver=None)
 #            with sv.managed_session() as sess:
-                print("parameter_count =", session.run(parameter_count))
 
                 if a.checkpoint is not None:
                     print("loading model from checkpoint")
