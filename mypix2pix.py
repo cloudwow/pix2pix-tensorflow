@@ -521,11 +521,11 @@ def add_stuff(examples, model):
         tf.summary.image("outputs", converted_outputs)
 
     with tf.name_scope("predict_real_summary"):
-        tf.summary.image("predict_real", tf.image.convert_image_dtype(model.predict_real, dtype=tf.uint8))
+    #    tf.summary.image("predict_real", tf.image.convert_image_dtype(model.predict_real, dtype=tf.uint8))
 
 
     with tf.name_scope("predict_fake_summary"):
-        tf.summary.image("predict_fake", tf.image.convert_image_dtype(model.predict_fake, dtype=tf.uint8))
+    #    tf.summary.image("predict_fake", tf.image.convert_image_dtype(model.predict_fake, dtype=tf.uint8))
 
     tf.summary.scalar("discriminator_loss", model.discrim_loss)
     tf.summary.scalar("generator_loss_GAN", model.gen_loss_GAN)
@@ -564,24 +564,24 @@ def run(target, is_chief, job_name, a):
 
     if is_chief:
 
-        evaluation_graph = tf.Graph()
-        with evaluation_graph.as_default():
+        # evaluation_graph = tf.Graph()
+        # with evaluation_graph.as_default():
 
-            examples = load_examples(input_dir, "test", a.scale_size, a.batch_size)
-            model = create_model(
-                examples.inputs,
-                examples.targets,
-                a.num_generator_filters,
-                a.num_discriminator_filters,
-                a.gan_weight,
-                a.l1_weight,
-                a.lr,
-                a.beta1)
-            display_fetches = add_stuff(examples, model)
+        #     examples = load_examples(input_dir, "test", a.scale_size, a.batch_size)
+        #     model = create_model(
+        #         examples.inputs,
+        #         examples.targets,
+        #         a.num_generator_filters,
+        #         a.num_discriminator_filters,
+        #         a.gan_weight,
+        #         a.l1_weight,
+        #         a.lr,
+        #         a.beta1)
+        #     display_fetches = add_stuff(examples, model)
 
 
-            hooks = [EvaluationRunHook(evaluation_graph, examples, model, output_dir, display_fetches)]
-
+        #     hooks = [EvaluationRunHook(evaluation_graph, examples, model, output_dir, display_fetches)]
+        hooks = []
     else:
         hooks = []
 
@@ -656,47 +656,49 @@ def run(target, is_chief, job_name, a):
                         "global_step": model.global_step,
                     }
 
-                    if should(a.progress_freq):
-                        fetches["discrim_loss"] = model.discrim_loss
-                        fetches["gen_loss_GAN"] = model.gen_loss_GAN
-                        fetches["gen_loss_L1"] = model.gen_loss_L1
+                    if is_chief:
+                        if should(a.progress_freq):
+                            fetches["discrim_loss"] = model.discrim_loss
+                            fetches["gen_loss_GAN"] = model.gen_loss_GAN
+                            fetches["gen_loss_L1"] = model.gen_loss_L1
 
-                    if should(a.summary_freq):
-                        #                            fetches["summary"] = sv.summary_op
-                        print("should summary")
-                    if should(a.display_freq):
-                        fetches["display"] = display_fetches
+                        if should(a.summary_freq):
+                            #                            fetches["summary"] = sv.summary_op
+                            print("should summary")
+                        if should(a.display_freq):
+                            fetches["display"] = display_fetches
 
                     results = session.run(fetches, options=options, run_metadata=run_metadata)
                     print("global step: "+str(results["global_step"]))
+                    if is_chief:
 
-                    if should(a.summary_freq):
-                        print("recording summary")
-                    #    sv.summary_writer.add_summary(results["summary"], results["global_step"])
+                        if should(a.summary_freq):
+                            print("recording summary")
+                        #    sv.summary_writer.add_summary(results["summary"], results["global_step"])
 
-                    if should(a.display_freq):
-                        print("saving display images")
-                        filesets = save_images(results["display"], output_dir, step=results["global_step"])
-                        append_index(filesets, step=True)
+                        if should(a.display_freq):
+                            print("saving display images")
+                            filesets = save_images(results["display"], output_dir, step=results["global_step"])
+                            append_index(filesets, step=True)
 
-                    if should(a.trace_freq):
-                        print("recording trace")
-                     #   sv.summary_writer.add_run_metadata(run_metadata, "step_%d" % results["global_step"])
+                        if should(a.trace_freq):
+                            print("recording trace")
+                         #   sv.summary_writer.add_run_metadata(run_metadata, "step_%d" % results["global_step"])
 
-                    if should(a.progress_freq):
-                        # global_step will have the correct step count if we resume from a checkpoint
-                        train_epoch = math.ceil(results["global_step"] / examples.steps_per_epoch)
-                        train_step = (results["global_step"] - 1) % examples.steps_per_epoch + 1
-                        rate = (step + 1) * a.batch_size / (time.time() - start)
-                        remaining = (max_steps - step) * a.batch_size / rate
-                        print("progress  epoch %d  step %d  image/sec %0.1f  remaining %dm" % (train_epoch, train_step, rate, remaining / 60))
-                        print("discrim_loss", results["discrim_loss"])
-                        print("gen_loss_GAN", results["gen_loss_GAN"])
-                        print("gen_loss_L1", results["gen_loss_L1"])
+                        if should(a.progress_freq):
+                            # global_step will have the correct step count if we resume from a checkpoint
+                            train_epoch = math.ceil(results["global_step"] / examples.steps_per_epoch)
+                            train_step = (results["global_step"] - 1) % examples.steps_per_epoch + 1
+                            rate = (step + 1) * a.batch_size / (time.time() - start)
+                            remaining = (max_steps - step) * a.batch_size / rate
+                            print("progress  epoch %d  step %d  image/sec %0.1f  remaining %dm" % (train_epoch, train_step, rate, remaining / 60))
+                            print("discrim_loss", results["discrim_loss"])
+                            print("gen_loss_GAN", results["gen_loss_GAN"])
+                            print("gen_loss_L1", results["gen_loss_L1"])
 
-                    if should(a.save_freq):
-                        print("saving model")
-                        #                            saver.save(session, os.path.join(output_dir, "model"), global_step=sv.global_step)
+                        if should(a.save_freq):
+                            print("saving model")
+                            #                            saver.save(session, os.path.join(output_dir, "model"), global_step=sv.global_step)
 
                     if session.should_stop():
                         break

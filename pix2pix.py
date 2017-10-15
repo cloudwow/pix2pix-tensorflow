@@ -3,6 +3,8 @@ from __future__ import division
 from __future__ import print_function
 
 import tensorflow as tf
+from tensorflow.python.lib.io import file_io
+
 import numpy as np
 import argparse
 import os
@@ -236,14 +238,11 @@ def lab_to_rgb(lab):
 
 
 def load_examples():
-    if a.input_dir is None or not os.path.exists(a.input_dir):
-        raise Exception("input_dir does not exist")
 
-    input_paths = glob.glob(os.path.join(a.input_dir, "*.jpg"))
+    input_paths = []
+    input_paths.extend(file_io.get_matching_files(a.input_dir+"/*.jpg"))
+
     decode = tf.image.decode_jpeg
-    if len(input_paths) == 0:
-        input_paths = glob.glob(os.path.join(a.input_dir, "*.png"))
-        decode = tf.image.decode_png
 
     if len(input_paths) == 0:
         raise Exception("input_dir contains no image files")
@@ -557,12 +556,6 @@ def main():
             raise Exception("checkpoint required for test mode")
 
         # load some options from the checkpoint
-        options = {"which_direction", "ngf", "ndf", "lab_colorization"}
-        with open(os.path.join(a.checkpoint, "options.json")) as f:
-            for key, val in json.loads(f.read()).items():
-                if key in options:
-                    print("loaded", key, "=", val)
-                    setattr(a, key, val)
         # disable these features in test mode
         a.scale_size = CROP_SIZE
         a.flip = False
@@ -570,8 +563,6 @@ def main():
     for k, v in a._get_kwargs():
         print(k, "=", v)
 
-    with open(os.path.join(a.output_dir, "options.json"), "w") as f:
-        f.write(json.dumps(vars(a), sort_keys=True, indent=4))
 
     if a.mode == "export":
         # export the generator to a meta graph that can be imported later for standalone generation
@@ -623,6 +614,7 @@ def main():
             sess.run(init_op)
             print("loading model from checkpoint")
             checkpoint = tf.train.latest_checkpoint(a.checkpoint)
+            print("got checkpoint")
             restore_saver.restore(sess, checkpoint)
             print("exporting model")
             export_saver.export_meta_graph(filename=os.path.join(a.output_dir, "export.meta"))
