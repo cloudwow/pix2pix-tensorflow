@@ -370,29 +370,30 @@ def save_images(fetches, output_dir, step=None):
     return filesets
 
 
-def append_index(filesets, step=False):
-    index_path = os.path.join(output_dir, "index.html")
-    if os.path.exists(index_path):
-        index = open(index_path, "a")
+def append_index(image_directory, filesets, step=False):
+    index_loc = image_directory+"/index.html"
+    if file_io.FileIO.exists(index_loc):
+        index_html = "<html><body><table><tr>\r\n"
     else:
-        index = open(index_path, "w")
-        index.write("<html><body><table><tr>")
-        if step:
-            index.write("<th>step</th>")
-        index.write("<th>name</th><th>input</th><th>output</th><th>target</th></tr>")
+        index_html =  file_io.FileIO(index_loc, "r").read();
+        
+    if step:
+        index_html+="<th>step</th>"
+        index_html+="<th>name</th><th>input</th><th>output</th><th>target</th></tr>"
 
     for fileset in filesets:
-        index.write("<tr>")
+        index_html+="<tr>"
 
         if step:
-            index.write("<td>%d</td>" % fileset["step"])
-        index.write("<td>%s</td>" % fileset["name"])
+            index_html += "<td>%d</td>" % fileset["step"]
+        index_html += "<td>%s</td>" % fileset["name"]
 
         for kind in ["inputs", "outputs", "targets"]:
-            index.write("<td><img src='images/%s'></td>" % fileset[kind])
+            index_html += "<td><img src='images/%s'></td>" % fileset[kind]
 
-        index.write("</tr>")
-    return index_path
+        index_html += "</tr>"
+    file_io.FileIO(index_loc, "w").write(index_html);
+
 
 class EvaluationRunHook(tf.train.SessionRunHook):
   """EvaluationRunHook performs continuous evaluation of the model.
@@ -722,7 +723,7 @@ if __name__ == "__main__":
     parser.add_argument("--progress_freq", type=int, default=50, help="display progress every progress_freq steps")
     parser.add_argument("--trace_freq", type=int, default=0, help="trace execution every trace_freq steps")
     parser.add_argument("--display_freq", type=int, default=0, help="write current training images every display_freq steps")
-    parser.add_argument("--save_freq", type=int, default=5000, help="save model every save_freq steps, 0 to disable")
+    parser.add_argument("--save_freq", type=int, default=1000, help="save model every save_freq steps, 0 to disable")
 
     parser.add_argument("--aspect_ratio", type=float, default=1.0, help="aspect ratio of output images (width/height)")
     parser.add_argument("--batch_size", type=int, default=1, help="number of images in batch")
