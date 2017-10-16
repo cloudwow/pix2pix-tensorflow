@@ -350,8 +350,6 @@ def create_model(inputs, targets,
 
 def save_images(fetches, output_dir, step=None):
     image_dir = os.path.join(output_dir, "images")
-    if not os.path.exists(image_dir):
-        os.makedirs(image_dir)
 
     filesets = []
     for i, in_path in enumerate(fetches["paths"]):
@@ -364,8 +362,7 @@ def save_images(fetches, output_dir, step=None):
             fileset[kind] = filename
             out_path = os.path.join(image_dir, filename)
             contents = fetches[kind][i]
-            with open(out_path, "wb") as f:
-                f.write(contents)
+            file_io.FileIO(output_path, "wb").write(contents);
         filesets.append(fileset)
     return filesets
 
