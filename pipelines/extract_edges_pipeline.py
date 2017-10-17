@@ -12,6 +12,12 @@ import binascii
 import base64
 import six
 
+import numpy as np
+
+from skimage.transform import PiecewiseAffineTransform, warp
+from skimage import data
+from scipy import misc
+
 import apache_beam as beam
 
 from apache_beam.metrics import Metrics
@@ -58,6 +64,35 @@ class ReadImage(beam.DoFn):
 
         file.write(result_bytes)
         file.close()
+    def warp_it(self, image):
+        import numpy as np
+
+        from skimage.transform import PiecewiseAffineTransform, warp
+        from scipy import misc
+        from PIL import Image
+        rows, cols = image.shape[0], image.shape[1]
+
+        src_cols = np.linspace(0, cols, 20)
+        src_rows = np.linspace(0, rows, 10)
+        src_rows, src_cols = np.meshgrid(src_rows, src_cols)
+        src = np.dstack([src_cols.flat, src_rows.flat])[0]
+
+        # add sinusoidal oscillation to coordinates
+        dst_rows = src[:, 1] - np.sin(np.linspace(0, 3 * np.pi, src.shape[0])) * 16
+        dst_cols = src[:, 0]
+        dst_rows += 8
+        dst = np.vstack([dst_cols, dst_rows]).T
+
+
+        tform = PiecewiseAffineTransform()
+        tform.estimate(src, dst)
+
+        out_rows = image.shape[0] -1.5 * 16
+        out_cols = cols
+        out = warp(image, tform, output_shape=(rows, cols))
+        from skimage import img_as_ubyte
+
+        return img_as_ubyte(out)
 
     def process(self, uri):
         from tensorflow.python.lib.io import file_io
@@ -73,7 +108,7 @@ class ReadImage(beam.DoFn):
         try:
             with _open_file_read_binary(uri) as f:
                 image_bytes = f.read()
-                    
+                
         # A variety of different calling libraries throw different exceptions here.
         # They all correspond to an unreadable file so we treat them equivalently.
         except Exception as e:  # pylint: disable=broad-except
@@ -90,25 +125,32 @@ class ReadImage(beam.DoFn):
         # fix weird color
         img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
-        # crop the center
+# crop the center
         img = img[0:383, 64:447,0:3]
         # resize to 256 square
         img = cv2.resize(img, (256, 256)) 
-        self.save_np_image(img, uri.replace("source","target"))
+        #        self.save_np_image(img, uri.replace("source","target"))
+        original_image =img.copy()
 
+        img = self.warp_it(img)
+
+#        img = cv2.imdecode(img, cv2.IMREAD_COLOR) # cv2.IMREAD_COLOR in OpenCV 3.1
+
+        
+        #        print(str(img))
+        #self.save_np_image(img, uri.replace("source","derp"))
+        # img = cv2.imdecode(img, cv2.IMREAD_COLOR) # cv2.IMREAD_COLOR in OpenCV 3.1
+
+        
+#        print(str(img))
+        
+ 
+        
         ###
         # lower mask (0-10)
-        img_hsv = img
-        lower_red = np.array([0,0,0])
-        upper_red = np.array([255,30,255])
-        mask = cv2.inRange(img_hsv, lower_red, upper_red)
+
         
       
-        # set my output img to zero everywhere except my mask
-        output_img = img.copy()
-        output_img[np.where(mask==0)] = [255,255,255]
-        #    cv2.imshow('image1',output_img)
-        
         ### 
         edges = cv2.Canny(img,100,200)
         
@@ -117,8 +159,6 @@ class ReadImage(beam.DoFn):
         edges = cv2.erode(edges, kernel, iterations=1)
         kernel = np.ones((3,3), np.uint8)
         edges = cv2.dilate(edges, kernel, iterations=1)
-        self.save_np_image(edges, uri.replace("source","input"))
-        #        edges = np.resize(edges, (256, 256, 3))
         img2 = np.zeros_like(img)
         img2[:,:,0] = edges
         img2[:,:,1] = edges
@@ -127,14 +167,14 @@ class ReadImage(beam.DoFn):
         train_img = np.zeros((256,512,3), np.uint8)
         x_offset=256
         y_offset=0
-        train_img[ y_offset:img.shape[0], x_offset:256+img.shape[1]] = img
+        train_img[ y_offset:original_image.shape[0], x_offset:256+original_image.shape[1]] = original_image
         x_offset=0
         y_offset=0
         train_img[y_offset:edges.shape[0], x_offset:edges.shape[1]] = edges
-        if random.randrange(10) >=8:
-            self.save_image(train_img, uri.replace("source","eval-set"))
-        else:
-            self.save_image(train_img, uri.replace("source","train-set"))
+        #        if random.randrange(10) >=8:
+        self.save_np_image(train_img, uri.replace("source","train_distorted"))
+        #        else:
+        #            self.save_image(train_img, uri.replace("source","train-set"))
     
 def run(args):
 #    pipeline_options = PipelineOptions.from_dictionary(vars(args))

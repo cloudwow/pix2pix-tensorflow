@@ -1,3 +1,4 @@
 *.pyc
 .idea
 simpsons/
+output/
