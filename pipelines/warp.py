@@ -5,38 +5,52 @@ from skimage.transform import PiecewiseAffineTransform, warp
 from skimage import data
 from scipy import misc
 
-image = misc.imread("./simpsons/s11e09_201.jpg")
-print("shape[0]: " + str(image.shape[0]))
-print("shape[1]: " + str(image.shape[1]))
-print("shape[2]: " + str(image.shape[2]))
+def warp_it(image):
+    import numpy as np
 
-rows, cols = image.shape[0], image.shape[1]
-src_cols = np.linspace(0, cols, 20)
-src_rows = np.linspace(0, rows, 10)
-src_rows, src_cols = np.meshgrid(src_rows, src_cols)
-src = np.dstack([src_cols.flat, src_rows.flat])[0]
+    from skimage.transform import PiecewiseAffineTransform, warp
+    from scipy import misc
+    from PIL import Image
+    rows, cols = image.shape[0], image.shape[1]
 
-# add sinusoidal oscillation to row coordinates
-dst_rows = src[:, 1] - np.sin(np.linspace(0, 3 * np.pi, src.shape[0])) * 20
-dst_cols = src[:, 0]
-dst_rows *= 1.5
-dst_rows -= 1.5 * 20
-dst = np.vstack([dst_cols, dst_rows]).T
+    src_cols = np.linspace(0, cols, 20)
+    src_rows = np.linspace(0, rows, 10)
+    src_rows, src_cols = np.meshgrid(src_rows, src_cols)
+    src = np.dstack([src_cols.flat, src_rows.flat])[0]
+    
+    # print(str(src))
+    # print("00000000000000000000000000000000000000000000000000")
+    # print(str(src[:, 1]))
+    # print("00000000000000000000000000000000000000000000000000")
 
+    # print(str(src[:, 0]))
 
-tform = PiecewiseAffineTransform()
-tform.estimate(src, dst)
+    # # add sinusoidal oscillation to coordinates
+    # dst_rows = src[:, 1] - np.sin(np.linspace(0, 3 * np.pi, src.shape[0])) * 16
+    # dst_cols = src[:, 0] - np.sin(np.linspace(0, 3 * np.pi, src.shape[0])) * 16
+    # dst_rows += 8
+    # dst = np.vstack([dst_cols, dst_rows]).T
+    from random import randint
+    dst = src.copy()
+    for i in range(dst.shape[0]):
+        x=dst[i][0]
+        y=dst[i][1]
+        
+        dst[i][0]+= randint(0,15)
+        dst[i][1]+= randint(0,15)
+         
+    tform = PiecewiseAffineTransform()
+    tform.estimate(src, dst)
 
-out_rows = image.shape[0] - 1.5 * 50
-out_cols = cols
-out = warp(image, tform, output_shape=(rows, out_cols))
-print("shape[0]: " + str(out.shape[0]))
-print("shape[1]: " + str(out.shape[1]))
-print("shape[2]: " + str(out.shape[2]))
+    out_rows = image.shape[0] -1.5 * 16
+    out_cols = cols
+    out = warp(image, tform, output_shape=(rows, cols))
+    from skimage import img_as_ubyte
 
+    return img_as_ubyte(out)
 
+image = misc.imread("../simpsons/s08e10_92.jpg")
+image = warp_it(image)
 fig, ax = plt.subplots()
-ax.imshow(out)
-ax.plot(tform.inverse(src)[:, 0], tform.inverse(src)[:, 1], '.b')
-ax.axis((0, out_cols, out_rows, 0))
+ax.imshow(image)
 plt.show()
