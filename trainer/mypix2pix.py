@@ -613,8 +613,8 @@ def run(target, is_chief, job_name, a):
                                                    is_chief=is_chief,
                                                    checkpoint_dir=output_dir,
                                                    hooks=hooks,
-                                                   save_checkpoint_secs=2000,
-                                                   save_summaries_steps=50) as session:
+                                                   save_checkpoint_secs=600,
+                                                   save_summaries_steps=1000) as session:
 
                 print("monitored session created.")
 #            sv = tf.train.Supervisor(logdir=logdir, save_summaries_secs=0, saver=None)
@@ -714,10 +714,10 @@ if __name__ == "__main__":
 
     parser.add_argument("--max_steps", type=int, help="number of training steps (0 to disable)")
     parser.add_argument("--max_epochs", type=int, help="number of training epochs")
-    parser.add_argument("--summary_freq", type=int, default=100, help="update summaries every summary_freq steps")
-    parser.add_argument("--progress_freq", type=int, default=50, help="display progress every progress_freq steps")
+    parser.add_argument("--summary_freq", type=int, default=1000, help="update summaries every summary_freq steps")
+    parser.add_argument("--progress_freq", type=int, default=500, help="display progress every progress_freq steps")
     parser.add_argument("--trace_freq", type=int, default=0, help="trace execution every trace_freq steps")
-    parser.add_argument("--display_freq", type=int, default=0, help="write current training images every display_freq steps")
+    parser.add_argument("--display_freq", type=int, default=1000, help="write current training images every display_freq steps")
     parser.add_argument("--save_freq", type=int, default=1000, help="save model every save_freq steps, 0 to disable")
 
     parser.add_argument("--aspect_ratio", type=float, default=1.0, help="aspect ratio of output images (width/height)")
@@ -725,7 +725,7 @@ if __name__ == "__main__":
     parser.add_argument("--which_direction", type=str, default="AtoB", choices=["AtoB", "BtoA"])
     parser.add_argument("--num_generator_filters", type=int, default=64, help="number of generator filters in first conv layer")
     parser.add_argument("--num_discriminator_filters", type=int, default=64, help="number of discriminator filters in first conv layer")
-    parser.add_argument("--scale_size", type=int, default=286, help="scale images to this size before cropping to 256x256")
+    parser.add_argument("--scale_size", type=int, default=256, help="scale images to this size before cropping to 256x256")
     parser.add_argument("--flip", dest="flip", action="store_true", help="flip images horizontally")
     parser.add_argument("--no_flip", dest="flip", action="store_false", help="don't flip images horizontally")
     parser.set_defaults(flip=True)
