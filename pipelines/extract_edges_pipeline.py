@@ -72,8 +72,8 @@ class ReadImage(beam.DoFn):
         from PIL import Image
         rows, cols = image.shape[0], image.shape[1]
 
-        src_cols = np.linspace(0, cols, 20)
-        src_rows = np.linspace(0, rows, 10)
+        src_cols = np.linspace(0, cols, 20) + np.random.uniform(-3,3,20)
+        src_rows = np.linspace(0, rows, 10) + np.random.uniform(-3,3,10)
         src_rows, src_cols = np.meshgrid(src_rows, src_cols)
         src = np.dstack([src_cols.flat, src_rows.flat])[0]
 
@@ -83,14 +83,14 @@ class ReadImage(beam.DoFn):
             x=dst[i][0]
             y=dst[i][1]
         
-            dst[i][0]+= randint(-8,8)
-            dst[i][1]+= randint(-8,8)
+            dst[i][0]+= randint(-6,6)
+            dst[i][1]+= randint(-6,6)
 
 
         tform = PiecewiseAffineTransform()
         tform.estimate(src, dst)
 
-        out_rows = image.shape[0] -1.5 * 16
+        out_rows = image.shape[0] -1.5 * 12
         out_cols = cols
         out = warp(image, tform, output_shape=(rows, cols), mode='constant', cval=1.0)
         from skimage import img_as_ubyte
@@ -178,7 +178,7 @@ class ReadImage(beam.DoFn):
         y_offset=0
         train_img[y_offset:edges.shape[0], x_offset:edges.shape[1]] = edges
         #        if random.randrange(10) >=8:
-        self.save_np_image(train_img, uri.replace("source","train_distorted").replace(".jpg","_distorted_1.jpg"))
+        self.save_np_image(train_img, uri.replace("source","train_distorted_2").replace(".jpg","_distorted_2.jpg"))
         #        else:
         #            self.save_image(train_img, uri.replace("source","train-set"))
     
