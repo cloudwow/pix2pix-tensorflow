@@ -77,11 +77,14 @@ class ReadImage(beam.DoFn):
         src_rows, src_cols = np.meshgrid(src_rows, src_cols)
         src = np.dstack([src_cols.flat, src_rows.flat])[0]
 
-        # add sinusoidal oscillation to coordinates
-        dst_rows = src[:, 1] - np.sin(np.linspace(0, 3 * np.pi, src.shape[0])) * 16
-        dst_cols = src[:, 0]
-        dst_rows += 8
-        dst = np.vstack([dst_cols, dst_rows]).T
+        from random import randint
+        dst = src.copy()
+        for i in range(dst.shape[0]):
+            x=dst[i][0]
+            y=dst[i][1]
+        
+            dst[i][0]+= randint(-8,8)
+            dst[i][1]+= randint(-8,8)
 
 
         tform = PiecewiseAffineTransform()
@@ -89,7 +92,7 @@ class ReadImage(beam.DoFn):
 
         out_rows = image.shape[0] -1.5 * 16
         out_cols = cols
-        out = warp(image, tform, output_shape=(rows, cols))
+        out = warp(image, tform, output_shape=(rows, cols), mode='constant', cval=1.0)
         from skimage import img_as_ubyte
 
         return img_as_ubyte(out)
@@ -132,7 +135,6 @@ class ReadImage(beam.DoFn):
         #        self.save_np_image(img, uri.replace("source","target"))
         original_image =img.copy()
 
-        img = self.warp_it(img)
 
 #        img = cv2.imdecode(img, cv2.IMREAD_COLOR) # cv2.IMREAD_COLOR in OpenCV 3.1
 
@@ -153,6 +155,8 @@ class ReadImage(beam.DoFn):
       
         ### 
         edges = cv2.Canny(img,100,200)
+        edges[0]=0
+        edges[edges.shape[0]-1]=0
         
         edges = cv2.bitwise_not(edges)
         kernel = np.ones((3,3), np.uint8)
@@ -164,7 +168,9 @@ class ReadImage(beam.DoFn):
         img2[:,:,1] = edges
         img2[:,:,2] = edges
         edges =img2
-        train_img = np.zeros((256,512,3), np.uint8)
+        edges = self.warp_it(edges)
+
+        train_img = np.full((256,512,3), 255, dtype=np.uint8)
         x_offset=256
         y_offset=0
         train_img[ y_offset:original_image.shape[0], x_offset:256+original_image.shape[1]] = original_image
@@ -172,7 +178,7 @@ class ReadImage(beam.DoFn):
         y_offset=0
         train_img[y_offset:edges.shape[0], x_offset:edges.shape[1]] = edges
         #        if random.randrange(10) >=8:
-        self.save_np_image(train_img, uri.replace("source","train_distorted"))
+        self.save_np_image(train_img, uri.replace("source","train_distorted").replace(".jpg","_distorted_1.jpg"))
         #        else:
         #            self.save_image(train_img, uri.replace("source","train-set"))
     

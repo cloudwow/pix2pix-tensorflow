@@ -15,8 +15,8 @@ gcloud ml-engine jobs submit training "$JOB_ID" \
        --config train_config.yaml \
        -- \
        --topic=simpsons \
-       --max_steps=10000 \
-       --checkpoint="$GCS_OUTPUT_PATH"
+       --max_steps=10000 
+#       --checkpoint="$GCS_OUTPUT_PATH"
       
 # Monitor training logs.
 gcloud ml-engine jobs stream-logs "$JOB_ID"
