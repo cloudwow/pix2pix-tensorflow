@@ -101,8 +101,10 @@ def check_image(image):
 
 def load_examples(input_base_dir,  scale_size, batch_size):
     input_dirs = [
-        input_base_dir+"/train_images",
-        input_base_dir+"/train_distorted_images"  ]
+#        input_base_dir+"/train_images",
+        input_base_dir+"/train_distorted_images" ,
+        input_base_dir+"/train_distorted_2_images" ,
+    ]
     input_paths = []
     for input_dir in input_dirs:
         input_paths.extend(file_io.get_matching_files(input_dir+"/*.jpg"))

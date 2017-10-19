@@ -178,7 +178,7 @@ class ReadImage(beam.DoFn):
         y_offset=0
         train_img[y_offset:edges.shape[0], x_offset:edges.shape[1]] = edges
         #        if random.randrange(10) >=8:
-        self.save_np_image(train_img, uri.replace("source","train_distorted_2").replace(".jpg","_distorted_2.jpg"))
+        self.save_np_image(train_img, uri.replace("source","train_distorted_2").replace(".jpg","_distorted_3.jpg"))
         #        else:
         #            self.save_image(train_img, uri.replace("source","train-set"))
     
