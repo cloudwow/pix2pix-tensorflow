@@ -13,8 +13,10 @@ gcloud ml-engine jobs submit training "$JOB_ID" \
        --staging-bucket "$BUCKET" \
        --region us-central1 \
        --config train_config.yaml \
+       --packages wheels/myp2p-0.0.2-py2.py3-none-any.whl \
        -- \
        --topic=simpsons \
+       --training_image_dir = train_distorted_images \
        --max_steps=30000 \
        --checkpoint="$GCS_OUTPUT_PATH"
       
