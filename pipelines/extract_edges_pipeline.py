@@ -1,16 +1,16 @@
 import ml_args as ml_args
 import argparse
-import csv
-import datetime
+#import csv
+#import datetime
 import errno
-import io
+#import io
 import logging
 import os
-import subprocess
-import sys
-import binascii
-import base64
-import six
+#import subprocess
+#import sys
+#import binascii
+#import base64
+#import six
 
 import numpy as np
 
@@ -98,6 +98,8 @@ class ReadImage(beam.DoFn):
         return img_as_ubyte(out)
 
     def process(self, uri):
+        import time
+        the_time = long(time.time())
         from tensorflow.python.lib.io import file_io
         from tensorflow.python.framework import errors
         
@@ -178,9 +180,8 @@ class ReadImage(beam.DoFn):
         y_offset=0
         train_img[y_offset:edges.shape[0], x_offset:edges.shape[1]] = edges
         #        if random.randrange(10) >=8:
-        self.save_np_image(train_img, uri.replace("source","train_distorted_2").replace(".jpg","_distorted_3.jpg"))
-        #        else:
-        #            self.save_image(train_img, uri.replace("source","train-set"))
+        self.save_np_image(train_img, uri.replace("source","train_distorted")
+            .replace(".jpg","_distorted_"+str(the_time)+".jpg"))
     
 def run(args):
 #    pipeline_options = PipelineOptions.from_dictionary(vars(args))

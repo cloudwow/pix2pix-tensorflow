@@ -2,7 +2,6 @@
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
-import myp2p.model as p2p_model
 
 import tensorflow as tf
 
@@ -107,6 +106,8 @@ def run(target, is_chief, job_name, a):
                 print(dirname)
                 training_image_dirs.append( input_dir+"/" + dirname)
             print(training_image_dirs)
+            import myp2p.model as p2p_model
+
             examples =p2p_model.load_examples(training_image_dirs, a.scale_size, a.batch_size)
             print("examples count = %d" % examples.count)
 
