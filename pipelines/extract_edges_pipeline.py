@@ -12,7 +12,6 @@ import os
 #import base64
 #import six
 
-import numpy as np
 
 from skimage.transform import PiecewiseAffineTransform, warp
 from skimage import data
@@ -46,7 +45,8 @@ class ListFiles(beam.DoFn):
       
 
 class ReadImage(beam.DoFn):
-    def __init__(self):
+    def __init__(self, noise):
+        self.noise = noise
         self.error_count = Metrics.counter('main', 'errorCount')
         self.success_count = Metrics.counter('main', 'successCount')
         
@@ -69,14 +69,17 @@ class ReadImage(beam.DoFn):
             mean = 0
             var = 0.1
             sigma = var**0.5
+            import numpy as np
+
             gauss = np.random.normal(mean,sigma,(row,col,ch))
             gauss = gauss.reshape(row,col,ch)
             noisy = image + gauss
             return noisy
-    def add_salt_and_pepper_noise(self, image)
+    def add_salt_and_pepper_noise(self, image):
             row,col,ch = image.shape
             s_vs_p = 0.5
             amount = 0.004
+            import numpy as np            
             out = np.copy(image)
             # Salt mode
             num_salt = np.ceil(amount * image.size * s_vs_p)
@@ -102,16 +105,17 @@ class ReadImage(beam.DoFn):
             x=dst[i][0]
             y=dst[i][1]
         
-            dst[i][0]+= randint(-6,6)
-            dst[i][1]+= randint(-6,6)
+            dst[i][0]+= randint(-8,8)
+            dst[i][1]+= randint(-8,8)
 
 
         tform = PiecewiseAffineTransform()
         tform.estimate(src, dst)
 
-        out_rows = image.shape[0] -1.5 * 12
+        out_rows = image.shape[0] -1.5 * 16
         out_cols = cols
         out = warp(image, tform, output_shape=(rows, cols), mode='constant', cval=1.0)
+
         from skimage import img_as_ubyte
 
         return img_as_ubyte(out)
@@ -152,7 +156,7 @@ class ReadImage(beam.DoFn):
 # crop the center
         img = img[0:383, 64:447,0:3]
         # resize to 256 square
-        img = cv2.resize(img, (256, 256)) 
+        img = cv2.resize(img, (512, 512)) 
         #        self.save_np_image(img, uri.replace("source","target"))
         original_image =img.copy()
 
@@ -174,7 +178,12 @@ class ReadImage(beam.DoFn):
 
         
       
-        ### 
+        ###
+        if(self.noise == "salt_and_pepper"):
+            img=self.add_salt_and_pepper_noise(img)
+        elif self.noise == "gauss":
+            img=self.add_gauss_noise(img)
+
         edges = cv2.Canny(img,100,200)
         edges[0]=0
         edges[edges.shape[0]-1]=0
@@ -190,19 +199,15 @@ class ReadImage(beam.DoFn):
         img2[:,:,2] = edges
         edges =img2
         edges = self.warp_it(edges)
-        if(a.noise == "salt_and_pepper"):
-            edges=add_salt_and_pepper_noise(edges)
-        elif a.noise == "gauss":
-        train_img = np.full((256,512,3), 255, dtype=np.uint8)
-            edges=add_gauss_noise(edges)
-        x_offset=256
+        train_img = np.full((512,1024,3), 255, dtype=np.uint8)
+        x_offset=512
         y_offset=0
-        train_img[ y_offset:original_image.shape[0], x_offset:256+original_image.shape[1]] = original_image
+        train_img[ y_offset:original_image.shape[0], x_offset:512+original_image.shape[1]] = original_image
         x_offset=0
         y_offset=0
         train_img[y_offset:edges.shape[0], x_offset:edges.shape[1]] = edges
         #        if random.randrange(10) >=8:
-        self.save_np_image(train_img, uri.replace("source","train_distorted")
+        self.save_np_image(train_img, uri.replace("source","train")
             .replace(".jpg","_distorted_"+str(the_time)+".jpg"))
     
 def run(args):
@@ -210,9 +215,9 @@ def run(args):
     pipeline_options = PipelineOptions()
   
     with beam.Pipeline(options=pipeline_options) as p:
-         _ = (p | beam.Create(["gs://" + args.gcs_bucket+"/simpsons/source_images"])
+         _ = (p | beam.Create(["gs://" + args.gcs_bucket+"/"+args.topic+"/source_images"])
                 | "list files" >> beam.ParDo(ListFiles())
-                | "read image" >> beam.ParDo(ReadImage()))
+                | "read image" >> beam.ParDo(ReadImage(args.noise)))
 
   
 def main():

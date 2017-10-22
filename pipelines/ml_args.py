@@ -10,6 +10,7 @@ def process_args():
     """
     parser = argparse.ArgumentParser(description='Runs Flowers Sample E2E pipeline.')
     parser.add_argument('--project', default=None, help='The project to which the job will be submitted.')
+    parser.add_argument('--topic', required = True, help='simpons. southpark.')
     parser.add_argument('--cloud', action='store_true', help='Run preprocessing on the cloud.')
     parser.add_argument('--train_input_path', default=None, help='Input specified as uri to CSV file for the train set')
     parser.add_argument('--eval_input_path', default=None, help='Input specified as uri to CSV file for the eval set.')

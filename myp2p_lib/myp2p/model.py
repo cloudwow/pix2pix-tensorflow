@@ -19,7 +19,7 @@ import threading
 
 EPS = 1e-12
 
-CROP_SIZE = 256
+CROP_SIZE = 512
 
 
 Examples = collections.namedtuple("Examples", "paths, inputs, targets, count, steps_per_epoch")
@@ -191,6 +191,7 @@ def create_generator(num_generator_filters, generator_inputs, generator_outputs_
         num_generator_filters * 8, # encoder_6: [batch, 8, 8, num_generator_filters * 8] => [batch, 4, 4, num_generator_filters * 8]
         num_generator_filters * 8, # encoder_7: [batch, 4, 4, num_generator_filters * 8] => [batch, 2, 2, num_generator_filters * 8]
         num_generator_filters * 8, # encoder_8: [batch, 2, 2, num_generator_filters * 8] => [batch, 1, 1, num_generator_filters * 8]
+        num_generator_filters * 8, # encoder_8: [batch, 2, 2, num_generator_filters * 8] => [batch, 1, 1, num_generator_filters * 8]
     ]
 
     for out_channels in layer_specs:
@@ -202,6 +203,7 @@ def create_generator(num_generator_filters, generator_inputs, generator_outputs_
             layers.append(output)
 
     layer_specs = [
+        (num_generator_filters * 8, 0.5),   # decoder_8: [batch, 1, 1, num_generator_filters * 8] => [batch, 2, 2, num_generator_filters * 8 * 2]
         (num_generator_filters * 8, 0.5),   # decoder_8: [batch, 1, 1, num_generator_filters * 8] => [batch, 2, 2, num_generator_filters * 8 * 2]
         (num_generator_filters * 8, 0.5),   # decoder_7: [batch, 2, 2, num_generator_filters * 8 * 2] => [batch, 4, 4, num_generator_filters * 8 * 2]
         (num_generator_filters * 8, 0.5),   # decoder_6: [batch, 4, 4, num_generator_filters * 8 * 2] => [batch, 8, 8, num_generator_filters * 8 * 2]
