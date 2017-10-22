@@ -22,6 +22,7 @@ def process_args():
     parser.add_argument('--temp_location', help='Dataflow GCS temp loc')
     parser.add_argument('--staging_location', help='Dataflow GCS staging loc')
     parser.add_argument('--setup_file', default='./setup.py', help='Dataflow setup.py')
+    parser.add_argument('--noise', choices=['none', 'salt_and_pepper', 'gauss'],default='none', help='what sort of noise to add')
     args, _ = parser.parse_known_args()
     if args.cloud and not args.project:
         args.project = get_cloud_project()

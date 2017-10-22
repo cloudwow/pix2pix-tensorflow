@@ -48,9 +48,28 @@ def warp_it(image):
     from skimage import img_as_ubyte
 
     return img_as_ubyte(out)
+def add_gauss_noise(image):
+        row,col,ch= image.shape
+        mean = 0
+        var = 0.1
+        sigma = var**0.5
+        gauss = np.random.normal(mean,sigma,(row,col,ch))
+        gauss = gauss.reshape(row,col,ch)
+        noisy = image + gauss
+        return noisy
+def add_salt_and_pepper_noise(image):
+        row,col,ch = image.shape
+        s_vs_p = 0.5
+        amount = 0.004
+        out = np.copy(image)
+        # Salt mode
+        num_salt = np.ceil(amount * image.size * s_vs_p)
+        coords = [np.random.randint(0, i - 1, int(num_salt))
+                  for i in image.shape]
+        out[coords] = 1
 
-image = misc.imread("../simpsons/s08e10_92.jpg")
-image = warp_it(image)
+image = misc.imread("../train_images/s08e10_92.jpg")
+image = add_salt_and_pepper_noise(image)
 fig, ax = plt.subplots()
 ax.imshow(image)
 plt.show()

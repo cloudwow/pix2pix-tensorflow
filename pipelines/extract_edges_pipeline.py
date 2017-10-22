@@ -64,6 +64,25 @@ class ReadImage(beam.DoFn):
 
         file.write(result_bytes)
         file.close()
+    def add_gauss_noise(self, image):
+            row,col,ch= image.shape
+            mean = 0
+            var = 0.1
+            sigma = var**0.5
+            gauss = np.random.normal(mean,sigma,(row,col,ch))
+            gauss = gauss.reshape(row,col,ch)
+            noisy = image + gauss
+            return noisy
+    def add_salt_and_pepper_noise(self, image)
+            row,col,ch = image.shape
+            s_vs_p = 0.5
+            amount = 0.004
+            out = np.copy(image)
+            # Salt mode
+            num_salt = np.ceil(amount * image.size * s_vs_p)
+            coords = [np.random.randint(0, i - 1, int(num_salt))
+                      for i in image.shape]
+            out[coords] = 1
     def warp_it(self, image):
         import numpy as np
 
@@ -171,8 +190,11 @@ class ReadImage(beam.DoFn):
         img2[:,:,2] = edges
         edges =img2
         edges = self.warp_it(edges)
-
+        if(a.noise == "salt_and_pepper"):
+            edges=add_salt_and_pepper_noise(edges)
+        elif a.noise == "gauss":
         train_img = np.full((256,512,3), 255, dtype=np.uint8)
+            edges=add_gauss_noise(edges)
         x_offset=256
         y_offset=0
         train_img[ y_offset:original_image.shape[0], x_offset:256+original_image.shape[1]] = original_image
