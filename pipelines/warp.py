@@ -68,8 +68,16 @@ def add_salt_and_pepper_noise(image):
                   for i in image.shape]
         out[coords] = 1
 
-image = misc.imread("../train_images/s08e10_92.jpg")
-image = add_salt_and_pepper_noise(image)
+        # Pepper mode
+        num_pepper = np.ceil(amount* image.size * (1. - s_vs_p))
+        coords = [np.random.randint(0, i - 1, int(num_pepper))
+                                                  for i in image.shape]
+        out[coords] = 0
+        return out
+image = misc.imread("../simpsons//s08e10_92.jpg")
+image = add_gauss_noise(image)
 fig, ax = plt.subplots()
-ax.imshow(image)
+from skimage import img_as_float
+
+ax.imshow(img_as_float(image))
 plt.show()
