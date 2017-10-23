@@ -65,27 +65,36 @@ class ReadImage(beam.DoFn):
         file.write(result_bytes)
         file.close()
     def add_gauss_noise(self, image):
-            row,col,ch= image.shape
-            mean = 0
-            var = 0.1
-            sigma = var**0.5
-            import numpy as np
+        row,col,ch= image.shape
+        mean = 0
+        var = 0.1
+        sigma = var**0.5
+        import numpy as np
 
-            gauss = np.random.normal(mean,sigma,(row,col,ch))
-            gauss = gauss.reshape(row,col,ch)
-            noisy = image + gauss
-            return noisy
+        gauss = np.random.normal(mean,sigma,(row,col,ch))
+        gauss = gauss.reshape(row,col,ch)
+        noisy = image + gauss
+        return noisy
     def add_salt_and_pepper_noise(self, image):
-            row,col,ch = image.shape
-            s_vs_p = 0.5
-            amount = 0.004
-            import numpy as np            
-            out = np.copy(image)
-            # Salt mode
-            num_salt = np.ceil(amount * image.size * s_vs_p)
-            coords = [np.random.randint(0, i - 1, int(num_salt))
-                      for i in image.shape]
-            out[coords] = 1
+        import numpy as np
+
+        row,col,ch = image.shape
+        s_vs_p = 0.5
+        amount = 0.004
+        out = np.copy(image)
+        # Salt mode
+        num_salt = np.ceil(amount * image.size * s_vs_p)
+        coords = [np.random.randint(0, i - 1, int(num_salt))
+                  for i in image.shape]
+        out[coords] = 1
+
+        # Pepper mode
+        num_pepper = np.ceil(amount* image.size * (1. - s_vs_p))
+        coords = [np.random.randint(0, i - 1, int(num_pepper))
+                                                  for i in image.shape]
+        out[coords] = 0
+        return out
+
     def warp_it(self, image):
         import numpy as np
 

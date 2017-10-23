@@ -1,2 +1,2 @@
-python export.py --topic=simpsons  \
-   --checkpoint=gs://pix2pixdata/simpsons/output 
+python export.py --topic=southpark  \
+   --checkpoint=gs://pix2pixdata/southpark/output 

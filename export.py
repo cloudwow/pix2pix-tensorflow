@@ -19,7 +19,7 @@ import myp2p.model as model
 BASE_DIR="gs://pix2pixdata"
 EPS = 1e-12
 
-CROP_SIZE = 256
+CROP_SIZE = 512
 
 def run(target, is_chief, job_name, a):
     output_dir = "./export"
@@ -116,7 +116,7 @@ if __name__ == "__main__":
     parser.add_argument("--aspect_ratio", type=float, default=1.0, help="aspect ratio of output images (width/height)")
     parser.add_argument("--num_generator_filters", type=int, default=64, help="number of generator filters in first conv layer")
     parser.add_argument("--num_discriminator_filters", type=int, default=64, help="number of discriminator filters in first conv layer")
-    parser.add_argument("--scale_size", type=int, default=286, help="scale images to this size before cropping to 256x256")
+    parser.add_argument("--scale_size", type=int, default=512, help="scale images to this size before cropping to 256x256")
     parser.add_argument("--flip", dest="flip", action="store_true", help="flip images horizontally")
     parser.add_argument("--no_flip", dest="flip", action="store_false", help="don't flip images horizontally")
     parser.set_defaults(flip=True)
