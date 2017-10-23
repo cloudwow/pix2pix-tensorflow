@@ -47,20 +47,22 @@ def warp_it(image):
     out = warp(image, tform, output_shape=(rows, cols))
     from skimage import img_as_ubyte
 
-    return img_as_ubyte(out)
+    return out
 def add_gauss_noise(image):
-        row,col,ch= image.shape
-        mean = 0
-        var = 0.1
-        sigma = var**0.5
-        gauss = np.random.normal(mean,sigma,(row,col,ch))
-        gauss = gauss.reshape(row,col,ch)
-        noisy = image + gauss
-        return noisy
+
+    row,col,ch= image.shape
+    mean = 0
+    var = 0.1
+    sigma = var**0.5
+    gauss = np.random.normal(mean,sigma,(row,col,ch))
+    gauss = gauss.reshape(row,col,ch)
+    noisy = image + gauss
+    return noisy
+
 def add_salt_and_pepper_noise(image):
         row,col,ch = image.shape
         s_vs_p = 0.5
-        amount = 0.004
+        amount = 0.2
         out = np.copy(image)
         # Salt mode
         num_salt = np.ceil(amount * image.size * s_vs_p)
@@ -74,10 +76,30 @@ def add_salt_and_pepper_noise(image):
                                                   for i in image.shape]
         out[coords] = 0
         return out
-image = misc.imread("../simpsons//s08e10_92.jpg")
-image = add_gauss_noise(image)
+
+def add_poisson(image):
+    vals = len(np.unique(image))
+    vals = 2 ** np.ceil(np.log2(vals))
+    noisy = np.random.poisson(image * vals) / float(vals)
+    return noisy
+def add_speckle(image):
+    row,col,ch = image.shape
+    gauss = np.random.randn(row,col,ch) 
+    gauss = gauss.reshape(row,col,ch)
+    noise = image * (gauss /16)
+    import cv2
+    noisy = cv2.add(image, noise, dtype=cv2.CV_8UC3)
+    #noisy = image + image * gauss
+    return noisy
+image = misc.imread("../simpsons/s08e10_92.jpg")
+#image = add_salt_and_pepper_noise(image)
+image = add_salt_and_pepper_noise(image)
 fig, ax = plt.subplots()
 from skimage import img_as_float
 
 ax.imshow(img_as_float(image))
-plt.show()
+
+plt.draw()
+plt.pause(1) 
+raw_input("<Hit Enter To Close>")
+plt.close(fig)
