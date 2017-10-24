@@ -112,7 +112,7 @@ render: function() {
     v.ctx.drawImage(editor_background, 0, 0)
     v.ctx.restore()
 
-    v.frame("tools", 8, 41, 100, 250, () => {
+    v.frame("tools", 160, 650, 100, 250, () => {
       var i = 0
       for (var name in this.config.colors) {
         var color = this.config.colors[name]
@@ -275,14 +275,14 @@ render: function() {
       }
     })
 
-    v.frame("undo_button", 492-32, 610, 64, 40, () => {
+    v.frame("undo_button", 522-32, 650, 64, 40, () => {
       if (do_button(v, "undo")) {
         this.pop_buffer()
         update()
       }
     })
 
-    v.frame("clear_button", 170-32, 610, 64, 40, () => {
+    v.frame("clear_button", 360-32, 650, 64, 40, () => {
       if (do_button(v, "clear")) {
         this.buffers = []
         this.buffer.fillStyle = this.config.clear
@@ -306,13 +306,13 @@ render: function() {
       })
     }
 
-    v.frame("save_button", 820, 610, 64, 40, () => {
+    v.frame("save_button", 1090, 650, 64, 40, () => {
       if (do_button(v, "save")) {
         // create a canvas to hold the part of the canvas that we wish to store
-        var x = 125 * SCALE
+        var x = 80 * SCALE
         var y = 0
-        var width = 800 * SCALE - x
-        var height = 310 * SCALE - y
+        var width = 1370 * SCALE - x
+        var height = 615 * SCALE - y
         var convert = createContext(width, height, 1)
         convert.drawImage(v.ctx.canvas, x, y, width, height, 0, 0, convert.canvas.width, convert.canvas.height)
         var data_b64 = convert.canvas.toDataURL("image/png").replace(/^data:image\/png;base64,/, "")
