@@ -1,3 +1,5 @@
-python trainer/mypix2pix.py --topic=simpsons --max_steps=1000 \
-       --training_image_dir train_distorted_images \
-       --verbosity=DEBUG --checkpoint=gs://pix2pixdata/simpsons/output
+python trainer/mypix2pix.py --topic=southpark --max_steps=500000 \
+       --checkpoint=./output \
+       --output_dir=./output \
+       --training_image_dir /ldata/data/southpark/train_images 
+

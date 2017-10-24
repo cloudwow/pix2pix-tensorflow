@@ -2,11 +2,7 @@
 <body>
 <div style="text-align: center;">
   <br/>
-  <br/>
-  <br/>
   <h1 >Southpark Scene Generator</h1>
-  <br/>
-  <br/>
   <br/>
 <div id="southpark"></div>
 </div>
@@ -168,11 +164,11 @@ render: function() {
       }
     })
 
-    v.frame("output", 736, 40, 512, 512, () => {
+    v.frame("output", 817, 83, 512, 512, () => {
       v.ctx.drawImage(this.output.canvas, 0, 0)
     })
 
-    v.frame("input", 140, 40, 512, 512+40, () => {
+    v.frame("input", 131, 82, 512, 512+40, () => {
       v.frame("image", 0, 0, 512, 512, () => {
         v.ctx.drawImage(this.buffer.canvas, 0, 0, v.f.width, v.f.height)
 
@@ -233,7 +229,7 @@ render: function() {
       })
     })
 
-    v.frame("process_button", 660 , 276, 32*2, 40, () => {
+    v.frame("process_button", 697 , 318, 32*2, 40, () => {
       if (request_in_progress) {
         do_button(v, "...")
       } else {
@@ -279,14 +275,14 @@ render: function() {
       }
     })
 
-    v.frame("undo_button", 192-32, 566, 64, 40, () => {
+    v.frame("undo_button", 492-32, 610, 64, 40, () => {
       if (do_button(v, "undo")) {
         this.pop_buffer()
         update()
       }
     })
 
-    v.frame("clear_button", 270-32, 566, 64, 40, () => {
+    v.frame("clear_button", 170-32, 610, 64, 40, () => {
       if (do_button(v, "clear")) {
         this.buffers = []
         this.buffer.fillStyle = this.config.clear
@@ -297,7 +293,7 @@ render: function() {
     })
 
     if (this.sheet_loaded) {
-      v.frame("random_button", 347-32, 310, 64, 40, () => {
+      v.frame("random_button", 447-32, 310, 64, 40, () => {
         if (do_button(v, "random")) {
           // pick next sheet entry
           this.buffers = []
@@ -310,7 +306,7 @@ render: function() {
       })
     }
 
-    v.frame("save_button", 720, 566, 64, 40, () => {
+    v.frame("save_button", 820, 610, 64, 40, () => {
       if (do_button(v, "save")) {
         // create a canvas to hold the part of the canvas that we wish to store
         var x = 125 * SCALE

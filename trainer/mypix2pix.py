@@ -47,7 +47,10 @@ def add_stuff(examples, model):
 
 def run(target, is_chief, job_name, a):
     input_dir = BASE_DIR+"/"+a.topic
-    output_dir = BASE_DIR+"/"+a.topic+"/output"
+    if a.output_dir==None:
+        output_dir = BASE_DIR+"/"+a.topic+"/output"
+    else:
+        output_dir  = a.output_dir
 
     if tf.__version__.split('.')[0] != "1":
         raise Exception("Tensorflow version 1 required")
@@ -59,8 +62,6 @@ def run(target, is_chief, job_name, a):
     np.random.seed(a.seed)
     random.seed(a.seed)
 
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
 
     for k, v in a._get_kwargs():
         print(k, "=", v)
@@ -104,7 +105,10 @@ def run(target, is_chief, job_name, a):
             training_image_dirs =  []
             for dirname in a.training_image_dir:
                 print(dirname)
-                training_image_dirs.append( input_dir+"/" + dirname)
+                if dirname.startswith("/") or dirname.startswith("./"):
+                     training_image_dirs.append( dirname)
+                else :
+                    training_image_dirs.append( input_dir+"/" + dirname)
             print(training_image_dirs)
             import myp2p.model as p2p_model
 
@@ -221,6 +225,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--topic", help="e.g. simpson. should match folder name in GCS")
     parser.add_argument("--training_image_dir", action="append")
+    parser.add_argument("--output_dir", default=None)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--checkpoint", default=None, help="directory with checkpoint to resume training from or use for testing")
 
