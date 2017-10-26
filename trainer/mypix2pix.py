@@ -134,7 +134,7 @@ def run(target, is_chief, job_name, a):
                                                    is_chief=is_chief,
                                                    checkpoint_dir=output_dir,
                                                    hooks=hooks,
-                                                   save_checkpoint_secs=1800,
+                                                   save_checkpoint_secs=300,
                                                    save_summaries_steps=1000) as session:
 
                 print("monitored session created.")
