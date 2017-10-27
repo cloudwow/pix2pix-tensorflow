@@ -211,8 +211,9 @@ def run(target, is_chief, job_name, a):
                                 print("saving model")
                                 #                            saver.save(session, os.path.join(output_dir, "model"), global_step=sv.global_step)
 
-                    except:
+                    except Exception, e:
                         print("caught exeption")
+                        session.request_stop(e)
                     if session.should_stop():
                         break
 
