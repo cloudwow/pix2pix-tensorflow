@@ -207,13 +207,13 @@ def create_generator(num_generator_filters, generator_inputs, generator_outputs_
             layers.append(output)
 
     layer_specs = [
-        (num_generator_filters * 8, 0.65),   # decoder_8: [batch, 1, 1, num_generator_filters * 8] => [batch, 2, 2, num_generator_filters * 8 * 2]
-        (num_generator_filters * 8, 0.65),   # decoder_8: [batch, 1, 1, num_generator_filters * 8] => [batch, 2, 2, num_generator_filters * 8 * 2]
-        (num_generator_filters * 8, 0.65),   # decoder_7: [batch, 2, 2, num_generator_filters * 8 * 2] => [batch, 4, 4, num_generator_filters * 8 * 2]
-        (num_generator_filters * 8, 0.65),   # decoder_6: [batch, 4, 4, num_generator_filters * 8 * 2] => [batch, 8, 8, num_generator_filters * 8 * 2]
-        (num_generator_filters * 8, 0.4),   # decoder_5: [batch, 8, 8, num_generator_filters * 8 * 2] => [batch, 16, 16, num_generator_filters * 8 * 2]
-        (num_generator_filters * 4, 0.2),   # decoder_4: [batch, 16, 16, num_generator_filters * 8 * 2] => [batch, 32, 32, num_generator_filters * 4 * 2]
-        (num_generator_filters * 2, 0.0),   # decoder_3: [batch, 32, 32, num_generator_filters * 4 * 2] => [batch, 64, 64, num_generator_filters * 2 * 2]
+        (num_generator_filters * 8, 0.5),   # decoder_8: [batch, 1, 1, num_generator_filters * 8] => [batch, 2, 2, num_generator_filters * 8 * 2]
+        (num_generator_filters * 8, 0.5),   # decoder_8: [batch, 1, 1, num_generator_filters * 8] => [batch, 2, 2, num_generator_filters * 8 * 2]
+        (num_generator_filters * 8, 0.5),   # decoder_7: [batch, 2, 2, num_generator_filters * 8 * 2] => [batch, 4, 4, num_generator_filters * 8 * 2]
+        (num_generator_filters * 8, 0.5),   # decoder_6: [batch, 4, 4, num_generator_filters * 8 * 2] => [batch, 8, 8, num_generator_filters * 8 * 2]
+        (num_generator_filters * 8, 0),   # decoder_5: [batch, 8, 8, num_generator_filters * 8 * 2] => [batch, 16, 16, num_generator_filters * 8 * 2]
+        (num_generator_filters * 4, 0),   # decoder_4: [batch, 16, 16, num_generator_filters * 8 * 2] => [batch, 32, 32, num_generator_filters * 4 * 2]
+        (num_generator_filters * 2, 0),   # decoder_3: [batch, 32, 32, num_generator_filters * 4 * 2] => [batch, 64, 64, num_generator_filters * 2 * 2]
         (num_generator_filters, 0.0),       # decoder_2: [batch, 64, 64, num_generator_filters * 2 * 2] => [batch, 128, 128, num_generator_filters * 2]
     ]
 
@@ -221,7 +221,7 @@ def create_generator(num_generator_filters, generator_inputs, generator_outputs_
     for decoder_layer, (out_channels, dropout) in enumerate(layer_specs):
         skip_layer = num_encoder_layers - decoder_layer - 1
         with tf.variable_scope("decoder_%d" % (skip_layer + 1)):
-            if decoder_layer == 0 or decoder_layer>=num_encoder_layers-2 :
+            if decoder_layer == 0 # or decoder_layer>=num_encoder_layers-2 :
                 # first decoder layer doesn't have skip connections
                 # since it is directly connected to the skip_layer
                 input = layers[-1]
