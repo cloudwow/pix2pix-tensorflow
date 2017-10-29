@@ -22,6 +22,7 @@ EPS = 1e-12
 CROP_SIZE = 512
 
 
+# Load all the variables that are in the checkpoint even if the checkpoint is missing some
 def optimistic_restore(session, save_file):
     reader = tf.train.NewCheckpointReader(save_file)
     saved_shapes = reader.get_variable_to_shape_map()
