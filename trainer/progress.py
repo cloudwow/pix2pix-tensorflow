@@ -22,6 +22,27 @@ EPS = 1e-12
 CROP_SIZE = 512
 
 
+def optimistic_restore(session, save_file):
+    reader = tf.train.NewCheckpointReader(save_file)
+    saved_shapes = reader.get_variable_to_shape_map()
+    var_names = sorted([(var.name, var.name.split(':')[0]) for var in tf.global_variables()
+                        if var.name.split(':')[0] in saved_shapes])
+    restore_vars = []
+    name2var = dict(zip(map(lambda x: x.name.split(':')[0], tf.global_variables()), tf.global_variables()))
+    with tf.variable_scope('', reuse=True):
+        for var_name, saved_var_name in var_names:
+            curr_var = name2var[saved_var_name]
+            var_shape = curr_var.get_shape().as_list()
+            if var_shape == saved_shapes[saved_var_name]:
+                restore_vars.append(curr_var)
+            else:
+                print("Not loading: %s." % saved_var_name)
+    saver = tf.train.Saver(restore_vars)
+    print ("Restoring vars:")
+    print (restore_vars)
+    saver.restore(session, save_file)
+
+
 def add_stuff(examples, model):
 
 
@@ -130,94 +151,19 @@ def run(target, is_chief, job_name, a):
             saver = tf.train.Saver(max_to_keep=1)
 
             logdir = output_dir if (a.trace_freq > 0 or a.summary_freq > 0) else None
+            init_op = tf.global_variables_initializer()
 
-            with tf.train.MonitoredTrainingSession(master=target,
-                                                   is_chief=is_chief,
-                                                   checkpoint_dir=output_dir,
-                                                   hooks=hooks,
-                                                   save_checkpoint_secs=300,
-                                                   save_summaries_steps=1000) as session:
+            export_saver = tf.train.Saver()
 
-                print("monitored session created.")
-#            sv = tf.train.Supervisor(logdir=logdir, save_summaries_secs=0, saver=None)
-#            with sv.managed_session() as sess:
-
-                if a.checkpoint is not None:
-                    print("loading model from checkpoint")
-                    checkpoint = tf.train.latest_checkpoint(a.checkpoint)
-                    saver.restore(session, checkpoint)
-
-                max_steps = 2**30
-                if a.max_epochs is not None:
-                    max_steps = examples.steps_per_epoch * a.max_epochs
-                if a.max_steps is not None:
-                    max_steps = a.max_steps
-
-
-                # training
-                start = time.time()
-                print("here we go")
-
-                for step in range(max_steps):
-                    print("step: " + str(step))
-                    def should(freq):
-                        return freq > 0 and ((step + 1) % freq == 0 or step == max_steps - 1)
-
-                    options = None
-                    run_metadata = None
-                    if should(a.trace_freq):
-                        options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
-                        run_metadata = tf.RunMetadata()
-
-                    fetches = {
-                        "train": model.train,
-                        "global_step": model.global_step,
-                    }
-
-                    if is_chief:
-                        if should(a.progress_freq):
-                            fetches["discrim_loss"] = model.discrim_loss
-                            fetches["gen_loss_GAN"] = model.gen_loss_GAN
-                            fetches["gen_loss_L1"] = model.gen_loss_L1
-
-                        if should(a.summary_freq):
-                            #                            fetches["summary"] = sv.summary_op
-                            print("should summary")
-                    try:        
-                        results = session.run(fetches, options=options, run_metadata=run_metadata)
-                        print("global step: "+str(results["global_step"]))
-                        if is_chief:
-
-                            if should(a.summary_freq):
-                                print("recording summary")
-                            #    sv.summary_writer.add_summary(results["summary"], results["global_step"])
-
-
-                            if should(a.trace_freq):
-                                print("recording trace")
-                             #   sv.summary_writer.add_run_metadata(run_metadata, "step_%d" % results["global_step"])
-
-                            if should(a.progress_freq):
-                                # global_step will have the correct step count if we resume from a checkpoint
-                                train_epoch = math.ceil(results["global_step"] / examples.steps_per_epoch)
-                                train_step = (results["global_step"] - 1) % examples.steps_per_epoch + 1
-                                rate = (step + 1) * a.batch_size / (time.time() - start)
-                                remaining = (max_steps - step) * a.batch_size / rate
-                                print("progress  epoch %d  step %d  image/sec %0.1f  remaining %dm" % (train_epoch, train_step, rate, remaining / 60))
-                                print("discrim_loss", results["discrim_loss"])
-                                print("gen_loss_GAN", results["gen_loss_GAN"])
-                                print("gen_loss_L1", results["gen_loss_L1"])
-
-                            if should(a.save_freq):
-                                print("saving model")
-                                #                            saver.save(session, os.path.join(output_dir, "model"), global_step=sv.global_step)
-
-                    except Exception, e:
-                        print("caught exeption")
-                        session.request_stop(e)
-                    if session.should_stop():
-                        break
-
+            with tf.Session() as sess:
+                sess.run(init_op)
+                print("loading model from checkpoint")
+                checkpoint = tf.train.latest_checkpoint(a.checkpoint)
+                optimistic_restore(sess,a.checkpoint)
+                print("exporting model")
+                export_saver.export_meta_graph(filename=os.path.join(output_dir, "export.meta"))
+                export_saver.save(sess, os.path.join(output_dir, "export"), write_meta_graph=False)
+        
 
 
 

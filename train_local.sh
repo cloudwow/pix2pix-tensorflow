@@ -1,7 +1,8 @@
 ./build.sh
-python trainer/mypix2pix.py --topic=southpark --max_steps=700000 \
+python trainer/mypix2pix.py --topic=southpark --max_steps=500 \
+       --depth=2\
        --output_dir=./output \
-       --training_image_dir /ldata/data/southpark/train_images 
+       --training_image_dir /big/data/southpark/train_images 
 
 
 #       --checkpoint=./output \

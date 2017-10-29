@@ -221,7 +221,7 @@ def create_generator(num_generator_filters, generator_inputs, generator_outputs_
     for decoder_layer, (out_channels, dropout) in enumerate(layer_specs):
         skip_layer = num_encoder_layers - decoder_layer - 1
         with tf.variable_scope("decoder_%d" % (skip_layer + 1)):
-            if decoder_layer == 0 # or decoder_layer>=num_encoder_layers-2 :
+            if decoder_layer == 0: # or decoder_layer>=num_encoder_layers-2 :
                 # first decoder layer doesn't have skip connections
                 # since it is directly connected to the skip_layer
                 input = layers[-1]
@@ -249,15 +249,15 @@ def create_generator(num_generator_filters, generator_inputs, generator_outputs_
     return layers[-1]
 
 
-def create_model(inputs, targets,
+def create_model(depth, inputs, targets,
                  num_generator_filters,
                  num_discriminator_filters,
                  gan_weight,
                  l1_weight,
                  lr,
                  beta1):
-    def create_discriminator(discrim_inputs, discrim_targets):
-        n_layers = 3
+    def create_discriminator(depth, discrim_inputs, discrim_targets):
+        n_layers = depth
         layers = []
 
         # 2x [batch, height, width, in_channels] => [batch, height, width, in_channels * 2]
@@ -298,12 +298,12 @@ def create_model(inputs, targets,
     with tf.name_scope("real_discriminator"):
         with tf.variable_scope("discriminator"):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
-            predict_real = create_discriminator(inputs, targets)
+            predict_real = create_discriminator(depth, inputs, targets)
 
     with tf.name_scope("fake_discriminator"):
         with tf.variable_scope("discriminator", reuse=True):
             # 2x [batch, height, width, channels] => [batch, 30, 30, 1]
-            predict_fake = create_discriminator(inputs, outputs)
+            predict_fake = create_discriminator(depth, inputs, outputs)
 
     with tf.name_scope("discriminator_loss"):
         # minimizing -tf.log will try to get inputs to 1
