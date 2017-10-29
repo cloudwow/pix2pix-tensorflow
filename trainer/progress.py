@@ -4,7 +4,7 @@ from __future__ import division
 from __future__ import print_function
 
 import tensorflow as tf
-
+from tensorflow.python.training.saver import latest_checkpoint
 from tensorflow.python.lib.io import file_io
 import numpy as np
 import argparse
@@ -23,7 +23,8 @@ CROP_SIZE = 512
 
 
 # Load all the variables that are in the checkpoint even if the checkpoint is missing some
-def optimistic_restore(session, save_file):
+def optimistic_restore(session, save_dir):
+    save_file = latest_checkpoint(save_dir)
     reader = tf.train.NewCheckpointReader(save_file)
     saved_shapes = reader.get_variable_to_shape_map()
     var_names = sorted([(var.name, var.name.split(':')[0]) for var in tf.global_variables()

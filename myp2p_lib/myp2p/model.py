@@ -38,14 +38,14 @@ def deprocess(image):
 
 
 
-def conv(batch_input, out_channels, stride):
+def conv(batch_input, out_channels, stride, init_std_dev = 0.02):
     with tf.variable_scope("conv"):
         in_channels = batch_input.get_shape()[3]
         filter = tf.get_variable(
             "filter",
             [4, 4, in_channels, out_channels],
             dtype=tf.float32,
-            initializer=tf.random_normal_initializer(0, 0.02))
+            initializer=tf.random_normal_initializer(0, init_std_dev))
         # [batch, in_height, in_width, in_channels], [filter_width, filter_height, in_channels, out_channels]
         #     => [batch, out_height, out_width, out_channels]
         padded_input = tf.pad(batch_input, [[0, 0], [1, 1], [1, 1], [0, 0]], mode="CONSTANT")
@@ -65,14 +65,14 @@ def lrelu(x, a):
         return (0.5 * (1 + a)) * x + (0.5 * (1 - a)) * tf.abs(x)
 
 
-def batchnorm(input):
+def batchnorm(input, init_std_dev = 0.02):
     with tf.variable_scope("batchnorm"):
         # this block looks like it has 3 inputs on the graph unless we do this
         input = tf.identity(input)
 
         channels = input.get_shape()[3]
         offset = tf.get_variable("offset", [channels], dtype=tf.float32, initializer=tf.zeros_initializer())
-        scale = tf.get_variable("scale", [channels], dtype=tf.float32, initializer=tf.random_normal_initializer(1.0, 0.02))
+        scale = tf.get_variable("scale", [channels], dtype=tf.float32, initializer=tf.random_normal_initializer(1.0, init_std_dev))
         mean, variance = tf.nn.moments(input, axes=[0, 1, 2], keep_dims=False)
         variance_epsilon = 1e-5
         normalized = tf.nn.batch_normalization(input, mean, variance, offset, scale, variance_epsilon=variance_epsilon)
@@ -108,7 +108,7 @@ def load_examples(input_dirs,  scale_size, batch_size):
     input_paths = []
     for input_dir in input_dirs:
         input_paths.extend(file_io.get_matching_files(input_dir+"/*.jpg"))
-    decode = tf.image.decode_jpeg
+        decode = tf.image.decode_jpeg
 
     if len(input_paths) == 0:
         raise Exception("input_dir contains no image files")
@@ -276,10 +276,13 @@ def create_model(depth, inputs, targets,
             with tf.variable_scope("layer_%d" % (len(layers) + 1)):
                 out_channels = num_discriminator_filters * min(2**(i+1), 8)
                 stride = 1 if i == n_layers - 1 else 2  # last layer here has stride 1
-                convolved = conv(layers[-1], out_channels, stride=stride)
-                normalized = batchnorm(convolved)
-                rectified = lrelu(normalized, 0.2)
-                layers.append(rectified)
+                init_std_dev = 0.02
+                if i > 1:
+                    init_std_dev = 0.002;
+                    convolved = conv(layers[-1], out_channels, stride=stride,init_std_dev=init_std_dev)
+                    normalized = batchnorm(convolved, init_std_dev=init_std_dev)
+                    rectified = lrelu(normalized, init_std_dev*10.0)
+                    layers.append(rectified)
 
         # layer_5: [batch, 31, 31, num_discriminator_filters * 8] => [batch, 30, 30, 1]
         with tf.variable_scope("layer_%d" % (len(layers) + 1)):
@@ -349,4 +352,3 @@ def create_model(depth, inputs, targets,
         train=tf.group(update_losses, incr_global_step, gen_train),
         global_step=global_step
     )
-
