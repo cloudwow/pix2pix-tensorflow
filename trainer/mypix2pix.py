@@ -44,8 +44,80 @@ def add_stuff(examples, model):
 
     with tf.name_scope("parameter_count"):
         parameter_count = tf.reduce_sum([tf.reduce_prod(tf.shape(v)) for v in tf.trainable_variables()])
+def export(target, a):
+    tf.reset_default_graph()
+    output_dir = "./export"
 
-def run(target, is_chief, job_name, a):
+
+    if a.output_dir==None:
+        checkpoint = BASE_DIR+"/"+a.topic+"/output"
+    else:
+        checkpoint  = a.output_dir
+
+    # load some options from the checkpoint
+    # disable these features in test mode
+    a.scale_size = CROP_SIZE
+    a.flip = False
+
+    input = tf.placeholder(tf.string, shape=[1])
+    input_data = tf.decode_base64(input[0])
+    input_image = tf.image.decode_png(input_data)
+
+    # remove alpha channel if present
+    input_image = tf.cond(tf.equal(tf.shape(input_image)[2], 4), lambda: input_image[:,:,:3], lambda: input_image)
+    # convert grayscale to RGB
+    input_image = tf.cond(tf.equal(tf.shape(input_image)[2], 1), lambda: tf.image.grayscale_to_rgb(input_image), lambda: input_image)
+
+    input_image = tf.image.convert_image_dtype(input_image, dtype=tf.float32)
+    input_image.set_shape([CROP_SIZE, CROP_SIZE, 3])
+    batch_input = tf.expand_dims(input_image, axis=0)
+    import myp2p.model as model
+
+    with tf.variable_scope("generator"):
+        batch_output = model.deprocess(
+            model.create_generator(a.num_generator_filters,
+                                   model.preprocess(batch_input), 3))
+
+    output_image = tf.image.convert_image_dtype(batch_output, dtype=tf.uint8)[0]
+    if a.output_filetype == "jpeg":
+        output_data = tf.image.encode_jpeg(output_image, quality=80)
+    else:
+        output_data = tf.image.encode_png(output_image)
+
+    output = tf.convert_to_tensor([tf.encode_base64(output_data)])
+
+    key = tf.placeholder(tf.string, shape=[1])
+    inputs = {
+        "key": key.name,
+        "input": input.name
+    }
+    tf.add_to_collection("inputs", json.dumps(inputs))
+    outputs = {
+        "key":  tf.identity(key).name,
+        "output": output.name,
+    }
+    tf.add_to_collection("outputs", json.dumps(outputs))
+
+    init_op = tf.global_variables_initializer()
+    restore_saver = tf.train.Saver()
+    export_saver = tf.train.Saver()
+
+            
+
+    with tf.Session() as sess:
+        print("monitored session created.")
+        sess.run(init_op)
+        print("loading model from checkpoint")
+        checkpoint = tf.train.latest_checkpoint(checkpoint)
+        restore_saver.restore(sess, checkpoint)
+        # ready to process image
+        print("exporting model")
+        export_saver.export_meta_graph(filename=os.path.join(output_dir, "export.meta"))
+        export_saver.save(sess, os.path.join(output_dir, "export"), write_meta_graph=False)
+        
+
+def run_some(target, is_chief, job_name, a):
+    tf.reset_default_graph()
     input_dir = BASE_DIR+"/"+a.topic
     if a.output_dir==None:
         output_dir = BASE_DIR+"/"+a.topic+"/output"
@@ -147,21 +219,19 @@ def run(target, is_chief, job_name, a):
                     checkpoint = tf.train.latest_checkpoint(a.checkpoint)
                     saver.restore(session, checkpoint)
 
-                max_steps = 2**30
-                if a.max_epochs is not None:
-                    max_steps = examples.steps_per_epoch * a.max_epochs
-                if a.max_steps is not None:
-                    max_steps = a.max_steps
+                steps_per_export = 1000
+                if a.steps_per_export is not None:
+                    steps_per_export = a.steps_per_export
 
 
                 # training
                 start = time.time()
                 print("here we go")
 
-                for step in range(max_steps):
+                for step in range(steps_per_export):
                     print("step: " + str(step))
                     def should(freq):
-                        return freq > 0 and ((step + 1) % freq == 0 or step == max_steps - 1)
+                        return freq > 0 and ((step + 1) % freq == 0 or step == steps_per_export - 1)
 
                     options = None
                     run_metadata = None
@@ -202,7 +272,7 @@ def run(target, is_chief, job_name, a):
                                 train_epoch = math.ceil(results["global_step"] / examples.steps_per_epoch)
                                 train_step = (results["global_step"] - 1) % examples.steps_per_epoch + 1
                                 rate = (step + 1) * a.batch_size / (time.time() - start)
-                                remaining = (max_steps - step) * a.batch_size / rate
+                                remaining = (steps_per_export - step) * a.batch_size / rate
                                 print("progress  epoch %d  step %d  image/sec %0.1f  remaining %dm" % (train_epoch, train_step, rate, remaining / 60))
                                 print("discrim_loss", results["discrim_loss"])
                                 print("gen_loss_GAN", results["gen_loss_GAN"])
@@ -219,6 +289,12 @@ def run(target, is_chief, job_name, a):
                         break
 
 
+def run(target, is_chief, job_name, a):
+    while 1:
+        run_some(target,is_chief,job_name,a)
+        if is_chief:
+            export(target, a)
+
 
 
                 
@@ -232,7 +308,7 @@ if __name__ == "__main__":
     parser.add_argument("--depth", type=int, help="number of layers in the discriminator")
     parser.add_argument("--checkpoint", default=None, help="directory with checkpoint to resume training from or use for testing")
 
-    parser.add_argument("--max_steps", type=int, help="number of training steps (0 to disable)")
+    parser.add_argument("--steps_per_export", type=int, help="number of training steps before exporting the model")
     parser.add_argument("--max_epochs", type=int, help="number of training epochs")
     parser.add_argument("--summary_freq", type=int, default=1000, help="update summaries every summary_freq steps")
     parser.add_argument("--progress_freq", type=int, default=500, help="display progress every progress_freq steps")
@@ -309,6 +385,5 @@ if __name__ == "__main__":
                 server.join()           
             elif job_name in ['master', 'worker']:
                 run(server.target, job_name == 'master', job_name, a=a)
-
 
 
